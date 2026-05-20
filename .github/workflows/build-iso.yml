@@ -55,7 +55,8 @@ jobs:
             go-installer/go-installer-linux-amd64
             bootstrap.key
             nixos-secure-installer.iso
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
           draft: false
           prerelease: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 

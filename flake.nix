@@ -1,18 +1,16 @@
 {
   description = "Modular Air-Gapped Workstation Infrastructure Configuration";
 
-  inputs = {
+ inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     home-manager = {
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     
-    # Public fallback repository placeholder. 
-    # The Go installer overrides this input target locally when building in private environments.
-    nix-home-work.url = "github:nix-community/empty-flake";
-  };
-
+    # Placeholder
+    nix-home-work.url = "github:nix-systems/default";
+  }; 
   outputs = { self, nixpkgs, home-manager, nix-home-work, ... }: {
     
     # -------------------------------------------------------------------------

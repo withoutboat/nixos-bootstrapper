@@ -41,7 +41,7 @@ jobs:
       # This step bakes the compiled Go binary and the codebase inside the ISO
       - name: Build Custom NixOS ISO
         run: |
-          nix build .#nixosConfigurations.iso.config.system.build.isoImage
+          nix build .#nixosConfigurations.iso.config.system.build.isoImage --impure
           
           # Locate the built .iso asset file and copy it to the root workspace directory
           # Nix stores build artifacts in /nix/store/ and creates a symlink named 'result'

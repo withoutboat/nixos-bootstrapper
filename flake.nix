@@ -86,7 +86,6 @@
           systemd.services.autostart-installer = {
             description = "Launch NixOS TUI Bootstrapper on Startup";
             after = [ "getty@tty1.service" ];
-            capsConfig = [ "tty" ];
             wantedBy = [ "multi-user.target" ];
             
             serviceConfig = {

@@ -22,6 +22,7 @@ jobs:
       - name: Build Go Installer
         run: |
           cd go-installer
+          go mod tidy
           GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o go-installer-linux-amd64 main.go
 
       # 2. Generate a cryptographically secure 64-byte random master key on the fly

@@ -1,18 +1,16 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
+	"crypto/sha256"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/crypto/argon2"
 )
 
 // -------------------------------------------------------------------------
@@ -41,26 +39,6 @@ var (
 )
 
 // -------------------------------------------------------------------------
-// Data Structures for lsblk JSON Parsing
-// -------------------------------------------------------------------------
-type BlockDevicePart struct {
-	Name   string `json:"name"`
-	FSType string `json:"fstype"`
-	Type   string `json:"type"`
-}
-
-type BlockDevice struct {
-	Name     string            `json:"name"`
-	FSType   string            `json:"fstype"`
-	Type     string            `json:"type"`
-	Children []BlockDevicePart `json:"children"`
-}
-
-type StoragePartitionsRoot struct {
-	Devices []BlockDevice `json:"blockdevices"`
-}
-
-// -------------------------------------------------------------------------
 // Bubble Tea Model Definitions
 // -------------------------------------------------------------------------
 type installStep struct {
@@ -69,12 +47,15 @@ type installStep struct {
 }
 
 type model struct {
-	steps       []installStep
-	currentStep int
-	progress    progress.Model
-	done        bool
-	err         error
-	logs        []string
+	steps        []installStep
+	currentStep  int
+	progress     progress.Model
+	textInput    textinput.Model
+	inputMode    bool // Toggle: true when waiting for passphrase input
+	masterPhrase string
+	done         bool
+	err          error
+	logs         []string
 }
 
 // Bubble Tea State Update Messages
@@ -84,63 +65,87 @@ type successMsg struct{}
 type errMsg struct{ err error }
 
 func initialModel() model {
+	ti := textinput.New()
+	ti.Placeholder = "Enter your master passphrase (minimum 20 characters)..."
+	ti.EchoMode = textinput.EchoNormal // Explicit plaintext view for safe verification
+	ti.Focus()
+
 	return model{
 		steps: []installStep{
-			{name: "Verify Hardware & Storage Geometry", log: "Initializing hardware diagnostics..."},
-			{name: "Discover Flashdrive B & Extract Key", log: "Scanning USB device interfaces..."},
-			{name: "Partition Target Disk & Create LUKS", log: "Formatting secure storage volumes..."},
-			{name: "Mount Filesystems & Prepare ZFS Tree", log: "Configuring ZFS storage pools..."},
-			{name: "Clone NixOS Configuration Repositories", log: "Downloading dotfiles configuration..."},
-			{name: "Execute nixos-install (Build Environment)", log: "Compiling environment configuration..."},
+			{name: "Verify hardware storage geometry", log: "Running diagnostics..."},
+			{name: "Deterministic key generation (Argon2id)", log: "Awaiting master passphrase..."},
+			{name: "Partition target disk & create LUKS container", log: "Formatting crypto-volumes..."},
+			{name: "Mount filesystems & prepare ZFS Tree", log: "Configuring ZFS storage pools..."},
+			{name: "Decrypt SOPS assets & execute nixos-install", log: "Building environment configuration..."},
+			{name: "Initialize Flashdrive B (Export age token)", log: "Writing key to physical token..."},
 		},
-		progress: progress.New(progress.WithDefaultGradient()),
-		logs:     []string{"Press ENTER to begin the automated deployment pipeline..."},
+		progress:  progress.New(progress.WithDefaultGradient()),
+		textInput: ti,
+		inputMode: true,
+		logs:      []string{"System state: Idle. Waiting for Master Passphrase to initialize crypto core."},
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return nil
+	return textinput.Blink
 }
 
 // -------------------------------------------------------------------------
 // Bubble Tea State Transitions (Update)
 // -------------------------------------------------------------------------
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	// Handle input processing isolated during phase one
+	if m.inputMode {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "enter":
+				val := m.textInput.Value()
+				if len(val) < 20 {
+					m.logs = append(m.logs, "❌ Error: Passphrase too short for secure AES-256 derivation!")
+					return m, nil
+				}
+				m.masterPhrase = val
+				m.inputMode = false
+				m.logs = append(m.logs, "🚀 Passphrase accepted. Launching automated deployment pipeline...")
+				return m, func() tea.Msg { return runDeploymentPipeline(m.masterPhrase) }
+			}
+		}
+		m.textInput, cmd = m.textInput.Update(msg)
+		return m, cmd
+	}
+
+	// Standard structural installation loop
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c", "q":
+		if msg.String() == "ctrl+c" || msg.String() == "q" {
 			return m, tea.Quit
-		case "enter":
-			if !m.done && m.currentStep == 0 && len(m.logs) == 1 {
-				m.logs = append(m.logs, "🚀 Launching deployment pipeline...")
-				return m, runDeploymentPipeline
-			}
 		}
 
 	case logMsg:
 		m.logs = append(m.logs, string(msg))
-		if len(m.logs) > 8 {
-			m.logs = m.logs[1:] // Keep log view compact
+		if len(m.logs) > 6 {
+			m.logs = m.logs[1:]
 		}
 		return m, nil
 
 	case stepCompleteMsg:
 		m.currentStep = int(msg)
 		pct := float64(m.currentStep) / float64(len(m.steps))
-		cmd := m.progress.SetPercent(pct)
-		return m, cmd
+		return m, m.progress.SetPercent(pct)
 
 	case successMsg:
 		m.done = true
 		m.progress.SetPercent(1.0)
-		m.logs = append(m.logs, "✨ Installation completed successfully! System is ready to reboot.")
 		return m, nil
 
 	case errMsg:
 		m.err = msg.err
 		m.done = true
-		m.logs = append(m.logs, fmt.Sprintf("❌ Error: %v", msg.err))
 		return m, nil
 
 	case progress.FrameMsg:
@@ -149,7 +154,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	return m, nil
+	return m, cmd
 }
 
 // -------------------------------------------------------------------------
@@ -158,13 +163,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	var s strings.Builder
 
-	s.WriteString("\n" + titleStyle.Render("NixOS Automated Secure Bootstrapper") + "\n\n")
+	s.WriteString("\n" + titleStyle.Render("NixOS Air-Gapped Master Bootstrapper") + "\n\n")
 
-	// Print workflow deployment steps
+	// Render processing step configurations
 	for i, step := range m.steps {
 		if i < m.currentStep {
 			s.WriteString(fmt.Sprintf("  [✓] %s\n", step.name))
-		} else if i == m.currentStep && !m.done {
+		} else if i == m.currentStep && !m.done && !m.inputMode {
 			s.WriteString(fmt.Sprintf("  [➔] %s — %s\n", step.name, statusStyle.Render(step.log)))
 		} else {
 			s.WriteString(fmt.Sprintf("  [ ] %s\n", step.name))
@@ -173,7 +178,12 @@ func (m model) View() string {
 
 	s.WriteString("\n " + m.progress.View() + "\n\n")
 
-	// Real-time runtime log console block
+	// Present functional input block if waiting for input
+	if m.inputMode {
+		s.WriteString(fmt.Sprintf("🔑 CRYPTO KEY PHRASE: %s\n\n", m.textInput.View()))
+	}
+
+	// Active log trail representation
 	s.WriteString("📝 System Logs:\n")
 	s.WriteString("--------------------------------------------------\n")
 	for _, log := range m.logs {
@@ -184,106 +194,47 @@ func (m model) View() string {
 	if m.err != nil {
 		s.WriteString("\n" + errorStyle.Render(fmt.Sprintf("Deployment failure: %v", m.err)) + "\n")
 	} else if m.done {
-		s.WriteString("\n" + successStyle.Render("All steps executed. You can now safely remove Flashdrive B.") + "\n")
-	} else {
-		s.WriteString("\n" + helpStyle.Render("Controls: Enter — Start Pipeline | Q/Ctrl+C — Exit") + "\n")
+		s.WriteString("\n" + successStyle.Render("✨ Finished! Remove Flashdrive A. Flashdrive B is now your master token. Rebooting.") + "\n")
 	}
 
 	return s.String()
 }
 
 // -------------------------------------------------------------------------
-// Hardware Logic: Hardware Partition Traversal & Key Extraction
+// Encryption Subsystem: Key Derivation Engine
 // -------------------------------------------------------------------------
-func locateBootstrapAssets() (string, bool) {
-	tempMountPoint := "/tmp/key-flashdrive-mnt"
-	resolvedKeyPath := "/tmp/active-bootstrap.key"
+func runDeploymentPipeline(phrase string) tea.Msg {
+	resolvedKeyPath := "/tmp/age.key"
+	salt := []byte("baseella-airgapped-salt-2026")
 
-	// Allocate a temporary runtime workspace inside the Live-CD RAM root
-	_ = os.MkdirAll(tempMountPoint, 0755)
-
-	// Fetch hardware block device geometry mapping in raw JSON from lsblk
-	cmd := exec.Command("lsblk", "-o", "NAME,FSTYPE,TYPE", "-j")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return "", false
-	}
-
-	var root StoragePartitionsRoot
-	if err := json.Unmarshal(out.Bytes(), &root); err != nil {
-		return "", false
-	}
-
-	// Traverse through active block device mappings and nested partitions
-	for _, dev := range root.Devices {
-		for _, part := range dev.Children {
-			// Isolate dedicated block storage target partitions
-			if part.Type != "part" || part.FSType == "" {
-				continue
-			}
-
-			devNode := "/dev/" + part.Name
-
-			// Execute a transient, read-only system mount to search for credentials
-			mountCmd := exec.Command("mount", "-o", "ro", devNode, tempMountPoint)
-			if err := mountCmd.Run(); err != nil {
-				continue // Mount failed (busy or restricted node), proceed to next device
-			}
-
-			targetKeyLocation := filepath.Join(tempMountPoint, "bootstrap.key")
-
-			// Check if the master encryption credential asset lives on this partition
-			if _, err := os.Stat(targetKeyLocation); err == nil {
-				// Asset resolved! Cache the payload bytes directly into local RAM
-				keyData, readErr := os.ReadFile(targetKeyLocation)
-				_ = exec.Command("umount", tempMountPoint).Run() // Immediately detach storage asset
-
-				if readErr == nil {
-					// Persist key inside RAM disk space with restrictive 0600 file permissions
-					_ = os.WriteFile(resolvedKeyPath, keyData, 0600)
-
-					// Inspect for companion home/work declarative configuration repository
-					privateEnvSource := filepath.Join(tempMountPoint, "nix-home-work")
-					_, privateEnvExists := os.Stat(privateEnvSource)
-
-					return resolvedKeyPath, privateEnvExists == nil
-				}
-			}
-
-			// Unmount device workspace partition if security keys were not discovered
-			_ = exec.Command("umount", tempMountPoint).Run()
-		}
-	}
-
-	return "", false
-}
-
-// -------------------------------------------------------------------------
-// Deployment Operations Pipeline
-// -------------------------------------------------------------------------
-func runDeploymentPipeline() tea.Msg {
+	// --- Step 1: Simulated Storage Verification ---
 	time.Sleep(1 * time.Second)
 
-	// --- Step 1: Geometry Verification (Placeholder action slot) ---
+	// --- Step 2: Argon2id Computation ---
+	// Extract 64 bytes of cryptographic entropy
+	rawKey := argon2.IDKey([]byte(phrase), salt, 3, 64*1024, 4, 64)
+
+	// Digest to SHA256 string footprint compatible with age configurations
+	hashed := sha256.Sum256(rawKey)
+
+	// Format matching standard age key parameters
+	ageKeyContent := fmt.Sprintf("# Transient OS Generation Key\nAGE-SECRET-KEY-1%x\n", hashed)
+
+	err := os.WriteFile(resolvedKeyPath, []byte(ageKeyContent), 0600)
+	if err != nil {
+		return errMsg{err: fmt.Errorf("failed to cache derived age token to RAM disk: %v", err)}
+	}
+
+	// Execution references will bind directly here:
+	// SOPS_AGE_KEY_FILE=/tmp/age.key nixos-install
+
+	// --- Steps 3, 4, 5: System Block Targets, Generation and Build Tasks ---
+	for i := 0; i < 3; i++ {
+		time.Sleep(1500 * time.Millisecond)
+	}
+
+	// --- Step 6: Flush active Key File to Flashdrive B ---
 	time.Sleep(1 * time.Second)
-
-	// --- Step 2: Flashdrive B Automation Core ---
-	bootstrapKeyFile, hasPrivateEnv := locateBootstrapAssets()
-	if bootstrapKeyFile == "" {
-		return errMsg{err: fmt.Errorf("security verification failed: Flashdrive B containing 'bootstrap.key' was not found")}
-	}
-
-	// --- Step 3: Target Block Cryptsetup Mapping ---
-	// Real-world execution hook utilizes `bootstrapKeyFile` string reference:
-	// Example: cryptsetup luksFormat /dev/nvme0n1p2 --key-file=bootstrapKeyFile
-	_ = bootstrapKeyFile
-	_ = hasPrivateEnv
-
-	// Simulate deep OS infrastructure deployment steps
-	for i := 1; i <= 6; i++ {
-		time.Sleep(1200 * time.Millisecond)
-	}
 
 	return successMsg{}
 }

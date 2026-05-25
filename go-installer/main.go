@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/progress"

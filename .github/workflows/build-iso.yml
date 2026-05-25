@@ -18,45 +18,35 @@ jobs:
         with:
           go-version: '1.24'
 
-      # 1. Compile the TUI installer binary for regular 64-bit Linux (amd64)
+      # 1. Compile the TUI installer binary for target 64-bit Linux architecture
       - name: Build Go Installer
         run: |
           cd go-installer
           go mod tidy
           GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o go-installer-linux-amd64 main.go
 
-      # 2. Generate a cryptographically secure 64-byte random master key on the fly
-      - name: Generate Secure Bootstrap Key
-        run: |
-          dd if=/dev/urandom of=bootstrap.key bs=1 count=64
-          echo "Master bootstrap encryption key generated."
-
-      # 3. Install Nix package manager inside the GitHub Runner execution space
+      # 2. Set up the Nix package manager environments inside the runner
       - name: Install Nix
         uses: cachix/install-nix-action@v25
         with:
           nix_path: nixpkgs=channel:nixos-unstable
 
-      # 4. Build the custom bootable NixOS Live-CD ISO (Flashdrive A)
-      # This step bakes the compiled Go binary and the codebase inside the ISO
+      # 3. Build the production air-gapped NixOS Live-CD ISO
+      # This image bakes in the encrypted SOPS configs but contains ZERO keys or passphrases
       - name: Build Custom NixOS ISO
         run: |
           nix build .#nixosConfigurations.iso.config.system.build.isoImage --impure
-          
-          # Locate the built .iso asset file and copy it to the root workspace directory
-          # Nix stores build artifacts in /nix/store/ and creates a symlink named 'result'
           cp result/iso/*.iso ./nixos-secure-installer.iso
 
-      # 5. Push all final compiled artifacts directly to GitHub Releases
+      # 4. Publish only pure code artifacts and the bootable image to GitHub Releases
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             go-installer/go-installer-linux-amd64
-            bootstrap.key
             nixos-secure-installer.iso
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
           draft: false
           prerelease: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

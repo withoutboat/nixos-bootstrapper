@@ -30,6 +30,7 @@ type sessionState int
 
 const (
 	stateSelectHost sessionState = iota
+	stateInputUsername
 	stateInputPassphrase
 	stateDeploying
 )
@@ -51,6 +52,7 @@ type model struct {
 	currentStep  int
 	progress     progress.Model
 	textInput    textinput.Model
+	username     string
 	masterPhrase string
 	yubiSerial   string
 	done         bool
@@ -65,8 +67,7 @@ type errMsg struct{ err error }
 
 func initialModel() model {
 	ti := textinput.New()
-	ti.Placeholder = "Enter your secure master passphrase..."
-	ti.EchoMode = textinput.EchoPassword
+	ti.Placeholder = "Enter target username (e.g. vladimir)..."
 	ti.Focus()
 
 	availableHosts := []string{"pc-th"}
@@ -124,12 +125,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selectedHost++
 				}
 			case "enter":
-				m.state = stateInputPassphrase
-				m.logs = append(m.logs, fmt.Sprintf("🎯 Profile target set: %s. Awaiting crypto authority validation...", m.hosts[m.selectedHost]))
+				m.state = stateInputUsername
+				m.textInput.Reset()
+				m.textInput.Placeholder = "Enter target username (e.g. vladimir)..."
+				m.textInput.EchoMode = textinput.EchoNormal
+				m.textInput.Focus()
+				m.logs = append(m.logs, fmt.Sprintf("🎯 Profile target set: %s. Awaiting username creation...", m.hosts[m.selectedHost]))
 				return m, nil
 			}
 		}
 		return m, nil
+
+	case stateInputUsername:
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "enter":
+				m.username = strings.TrimSpace(m.textInput.Value())
+				if m.username == "" {
+					m.err = fmt.Errorf("username cannot be empty")
+					return m, nil
+				}
+				m.state = stateInputPassphrase
+				m.textInput.Reset()
+				m.textInput.Placeholder = "Enter your secure master passphrase..."
+				m.textInput.EchoMode = textinput.EchoPassword
+				m.textInput.Focus()
+				m.logs = append(m.logs, fmt.Sprintf("👤 Username registered: %s. Awaiting crypto authority validation...", m.username))
+				return m, nil
+			}
+		}
+		m.textInput, cmd = m.textInput.Update(msg)
+		return m, cmd
 
 	case stateInputPassphrase:
 		switch msg := msg.(type) {
@@ -175,7 +204,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.progress.SetPercent(1.0)
 			}
 
-			return m, tea.Batch(m.progress.SetPercent(pct), m.runStep(nextStep))
+			return tea.Batch(m.progress.SetPercent(pct), m.runStep(nextStep))
 
 		case errMsg:
 			m.err = msg.err
@@ -208,7 +237,7 @@ func (m model) View() string {
 		s.WriteString("\n [ Navigation: Up/Down or J/K • Selection: Enter ]\n\n")
 	}
 
-	if m.state == stateInputPassphrase || m.state == stateDeploying {
+	if m.state == stateInputUsername || m.state == stateInputPassphrase || m.state == stateDeploying {
 		for i, step := range m.steps {
 			if i < m.currentStep {
 				s.WriteString(fmt.Sprintf("  [✓] %s\n", step.name))
@@ -219,6 +248,10 @@ func (m model) View() string {
 			}
 		}
 		s.WriteString("\n " + m.progress.View() + "\n\n")
+	}
+
+	if m.state == stateInputUsername {
+		s.WriteString(fmt.Sprintf("👤 TARGET USERNAME: %s\n\n", m.textInput.View()))
 	}
 
 	if m.state == stateInputPassphrase {
@@ -289,28 +322,48 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			return stepCompleteMsg(stepIdx)
 
 		case 4:
-			configTargetDir := "./hosts"
-			_ = exec.Command("mkdir", "-p", configTargetDir).Run()
+			targetSysConfigDir := "/mnt/etc/nixos"
+			_ = exec.Command("mkdir", "-p", targetSysConfigDir).Run()
 
-			hardwareFile := fmt.Sprintf("%s/%s-hardware.nix", configTargetDir, m.hosts[m.selectedHost])
-			cmd := exec.Command("nixos-generate-config", "--show-hardware-config")
+			cmd := exec.Command("nixos-generate-config", "--root", "/mnt", "--show-hardware-config")
 			var out bytes.Buffer
 			cmd.Stdout = &out
 			if err := cmd.Run(); err != nil {
 				return errMsg{err: fmt.Errorf("hardware topology inspection failed: %v", err)}
 			}
 
+			hardwareFile := filepath.Join(targetSysConfigDir, "hardware-configuration.nix")
 			if err := os.WriteFile(hardwareFile, out.Bytes(), 0644); err != nil {
 				return errMsg{err: fmt.Errorf("failed writing dynamic hardware description: %v", err)}
 			}
 			return stepCompleteMsg(stepIdx)
 
 		case 5:
-			targetFlake := fmt.Sprintf(".#%s", m.hosts[m.selectedHost])
+			userHomeDir := fmt.Sprintf("/mnt/home/%s/nix-core", m.username)
+			_ = exec.Command("mkdir", "-p", filepath.Dir(userHomeDir)).Run()
+
+			repoURL := "https://github.com/MarkovVA/nix-core.git"
+			cloneCmd := exec.Command("git", "clone", repoURL, userHomeDir)
+			if err := cloneCmd.Run(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to clone infrastructure ecosystem into user home: %v", err)}
+			}
+
+			userContextFile := filepath.Join(userHomeDir, "hosts", "user-context.nix")
+			userContextContent := fmt.Sprintf("{ username = \"%s\"; }\n", m.username)
+			if err := os.WriteFile(userContextFile, []byte(userContextContent), 0644); err != nil {
+				return errMsg{err: fmt.Errorf("failed to write user context runtime data: %v", err)}
+			}
+
+			chownTarget := fmt.Sprintf("/mnt/home/%s", m.username)
+			_ = exec.Command("chown", "-R", "1000:100", chownTarget).Run()
+
+			targetFlake := fmt.Sprintf("%s#%s", userHomeDir, m.hosts[m.selectedHost])
 			cmd := exec.Command("nixos-install", "--flake", targetFlake)
 			cmd.Env = append(os.Environ(), "SOPS_AGE_KEY_FILE=/tmp/age.key")
 
-			time.Sleep(1000 * time.Millisecond)
+			if err := cmd.Run(); err != nil {
+				return errMsg{err: fmt.Errorf("nixos-install execution failed: %v", err)}
+			}
 
 			go func() {
 				time.Sleep(3 * time.Second)

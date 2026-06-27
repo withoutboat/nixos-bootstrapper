@@ -18,7 +18,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22' # Stable release with robust cryptographic primitives
+          go-version: '1.22'
 
       - name: Install Dependencies
         run: |
@@ -26,13 +26,12 @@ jobs:
 
       - name: Build Static Binary
         run: |
-          # Compile fully standalone static executable (CGO_ENABLED=0)
-          # Strip debug tables and symbols (-s -w) to minimize structural footprint
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o nixos-bootstrapper main.go
+          chmod +x nixos-bootstrapper
 
-      - name: Package Binary
+      - name: Package Binary Flat
         run: |
-          tar -czvf nixos-bootstrapper-linux-amd64.tar.gz nixos-bootstrapper
+          tar -czvf nixos-bootstrapper-linux-amd64.tar.gz -C . nixos-bootstrapper
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

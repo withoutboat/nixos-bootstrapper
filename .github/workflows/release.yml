@@ -1,0 +1,45 @@
+name: Release Bootstrapper Binary
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger build pipeline on tag pushes (e.g., v1.0.0)
+
+permissions:
+  contents: write # Required to register GitHub releases and upload artifacts
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22' # Stable release with robust cryptographic primitives
+
+      - name: Install Dependencies
+        run: |
+          go mod tidy
+
+      - name: Build Static Binary
+        run: |
+          # Compile fully standalone static executable (CGO_ENABLED=0)
+          # Strip debug tables and symbols (-s -w) to minimize structural footprint
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o nixos-bootstrapper main.go
+
+      - name: Package Binary
+        run: |
+          tar -czvf nixos-bootstrapper-linux-amd64.tar.gz nixos-bootstrapper
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: nixos-bootstrapper-linux-amd64.tar.gz
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

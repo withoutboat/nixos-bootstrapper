@@ -77,6 +77,11 @@ func initialModel() model {
 
 	exePath, err := os.Executable()
 	if err == nil {
+		realPath, err := filepath.EvalSymlinks(exePath)
+		if err == nil {
+			exePath = realPath
+		}
+
 		configPath := filepath.Join(filepath.Dir(exePath), "hosts.json")
 		configFile, err := os.ReadFile(configPath)
 		if err == nil {

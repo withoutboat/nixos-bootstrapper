@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -30,9 +29,11 @@ type sessionState int
 
 const (
 	stateSelectHost sessionState = iota
+	stateSelectDisk
 	stateInputUsername
 	stateInputPassphrase
-	stateInputWiFi
+	stateSelectWiFi
+	stateInputWiFiPass
 	stateDeploying
 )
 
@@ -49,14 +50,19 @@ type model struct {
 	state        sessionState
 	hosts        []string
 	selectedHost int
+	disks        []string
+	selectedDisk int
+	targetDisk   string
+	wifis        []string
+	selectedWiFi int
+	wifiSSID     string
+	wifiPass     string
 	steps        []installStep
 	currentStep  int
 	progress     progress.Model
 	textInput    textinput.Model
 	username     string
 	masterPhrase string
-	wifiSSID     string
-	wifiPass     string
 	yubiSerial   string
 	done         bool
 	err          error
@@ -81,7 +87,6 @@ func initialModel() model {
 		if err == nil {
 			exePath = realPath
 		}
-
 		configPath := filepath.Join(filepath.Dir(exePath), "hosts.json")
 		configFile, err := os.ReadFile(configPath)
 		if err == nil {
@@ -98,6 +103,7 @@ func initialModel() model {
 		selectedHost: 0,
 		steps: []installStep{
 			{name: "Detect hardware storage & YubiKey presence", log: "Pending..."},
+			{name: "Partition & Mount Target Disk", log: "Pending..."},
 			{name: "Connect to Wi-Fi Network", log: "Pending..."},
 			{name: "Extract YubiKey metadata for dynamic salt", log: "Pending..."},
 			{name: "Generate deterministic transient age key (Argon2id)", log: "Pending..."},
@@ -134,16 +140,43 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selectedHost++
 				}
 			case "enter":
+				m.disks = getAvailableDisks()
+				if len(m.disks) == 0 {
+					m.err = fmt.Errorf("no suitable disks found for installation")
+					return m, nil
+				}
+				m.state = stateSelectDisk
+				m.logs = append(m.logs, fmt.Sprintf("🎯 Profile target set: %s. Awaiting disk selection...", m.hosts[m.selectedHost]))
+				return m, nil
+			}
+		}
+
+	case stateSelectDisk:
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "up", "k":
+				if m.selectedDisk > 0 {
+					m.selectedDisk--
+				}
+			case "down", "j":
+				if m.selectedDisk < len(m.disks)-1 {
+					m.selectedDisk++
+				}
+			case "enter":
+				// Извлекаем только путь к устройству (например, /dev/nvme0n1)
+				m.targetDisk = strings.Split(m.disks[m.selectedDisk], " ")[0]
 				m.state = stateInputUsername
 				m.textInput.Reset()
 				m.textInput.Placeholder = "Enter target username (e.g. vladimir)..."
 				m.textInput.EchoMode = textinput.EchoNormal
 				m.textInput.Focus()
-				m.logs = append(m.logs, fmt.Sprintf("🎯 Profile target set: %s. Awaiting username creation...", m.hosts[m.selectedHost]))
+				m.logs = append(m.logs, fmt.Sprintf("💾 Target disk set: %s. Awaiting username creation...", m.targetDisk))
 				return m, nil
 			}
 		}
-		return m, nil
 
 	case stateInputUsername:
 		switch msg := msg.(type) {
@@ -159,8 +192,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.state = stateInputPassphrase
 				m.textInput.Reset()
-				m.textInput.Placeholder = "Enter your secure master passphrase..."
-				m.textInput.EchoMode = textinput.EchoPassword
+				m.textInput.Placeholder = "Enter your secure master passphrase (hidden)..."
+				m.textInput.EchoMode = textinput.EchoNone // Слепой ввод пароля
 				m.textInput.Focus()
 				m.logs = append(m.logs, fmt.Sprintf("👤 Username registered: %s. Awaiting crypto authority validation...", m.username))
 				return m, nil
@@ -181,34 +214,60 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.err = fmt.Errorf("passphrase metrics suboptimal: minimum 8 characters required")
 					return m, nil
 				}
-				m.state = stateInputWiFi
-				m.textInput.Reset()
-				m.textInput.Placeholder = "Enter Wi-Fi SSID..."
-				m.textInput.EchoMode = textinput.EchoNormal
-				m.textInput.Focus()
-				m.logs = append(m.logs, "🚀 Crypto signature confirmed. Awaiting network configuration...")
+				m.wifis = getWiFiNetworks()
+				if len(m.wifis) == 0 {
+					m.wifis = []string{"Manual Entry"}
+				}
+				m.state = stateSelectWiFi
+				m.logs = append(m.logs, "🚀 Crypto signature confirmed. Scanning Wi-Fi networks...")
 				return m, nil
 			}
 		}
 		m.textInput, cmd = m.textInput.Update(msg)
 		return m, cmd
 
-	case stateInputWiFi:
+	case stateSelectWiFi:
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "up", "k":
+				if m.selectedWiFi > 0 {
+					m.selectedWiFi--
+				}
+			case "down", "j":
+				if m.selectedWiFi < len(m.wifis)-1 {
+					m.selectedWiFi++
+				}
+			case "enter":
+				m.wifiSSID = m.wifis[m.selectedWiFi]
+				m.state = stateInputWiFiPass
+				m.textInput.Reset()
+				if m.wifiSSID == "Manual Entry" {
+					m.textInput.Placeholder = "Type SSID manually..."
+					m.textInput.EchoMode = textinput.EchoNormal
+				} else {
+					m.textInput.Placeholder = fmt.Sprintf("Enter Wi-Fi Password for '%s' (hidden)...", m.wifiSSID)
+					m.textInput.EchoMode = textinput.EchoNone // Слепой ввод Wi-Fi пароля
+				}
+				m.textInput.Focus()
+				return m, nil
+			}
+		}
+
+	case stateInputWiFiPass:
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
 			switch msg.String() {
 			case "ctrl+c", "q":
 				return m, tea.Quit
 			case "enter":
-				if m.wifiSSID == "" {
+				if m.wifiSSID == "Manual Entry" {
 					m.wifiSSID = strings.TrimSpace(m.textInput.Value())
-					if m.wifiSSID == "" {
-						m.err = fmt.Errorf("SSID cannot be empty")
-						return m, nil
-					}
 					m.textInput.Reset()
-					m.textInput.Placeholder = "Enter Wi-Fi Password..."
-					m.textInput.EchoMode = textinput.EchoPassword
+					m.textInput.Placeholder = fmt.Sprintf("Enter Wi-Fi Password for '%s' (hidden)...", m.wifiSSID)
+					m.textInput.EchoMode = textinput.EchoNone
 					return m, nil
 				} else {
 					m.wifiPass = m.textInput.Value()
@@ -278,20 +337,41 @@ func (m model) View() string {
 		s.WriteString("\n [ Navigation: Up/Down or J/K • Selection: Enter ]\n\n")
 	}
 
+	if m.state == stateSelectDisk {
+		s.WriteString(errorStyle.Render(" WARNING: SELECTED DISK WILL BE COMPLETELY WIPED!\n"))
+		s.WriteString(" Select Target Installation Disk:\n")
+		for i, disk := range m.disks {
+			if m.selectedDisk == i {
+				s.WriteString(focusedStyle.Render(fmt.Sprintf("  ➔  %s\n", disk)))
+			} else {
+				s.WriteString(fmt.Sprintf("     %s\n", disk))
+			}
+		}
+		s.WriteString("\n [ Navigation: Up/Down or J/K • Selection: Enter ]\n\n")
+	}
+
 	if m.state == stateInputUsername {
 		s.WriteString(fmt.Sprintf("👤 TARGET USERNAME: %s\n\n", m.textInput.View()))
 	}
 
 	if m.state == stateInputPassphrase {
-		s.WriteString(fmt.Sprintf("🔑 MASTER PASSPHRASE: %s\n\n", m.textInput.View()))
+		s.WriteString(fmt.Sprintf("🔑 MASTER PASSPHRASE (hidden): %s\n\n", m.textInput.View()))
 	}
 
-	if m.state == stateInputWiFi {
-		if m.wifiSSID == "" {
-			s.WriteString(fmt.Sprintf("📶 ENTER WI-FI SSID:\n%s\n\n", m.textInput.View()))
-		} else {
-			s.WriteString(fmt.Sprintf("🔑 ENTER PASSWORD FOR '%s':\n%s\n\n", m.wifiSSID, m.textInput.View()))
+	if m.state == stateSelectWiFi {
+		s.WriteString("📶 Select Wi-Fi Network:\n")
+		for i, wifi := range m.wifis {
+			if m.selectedWiFi == i {
+				s.WriteString(focusedStyle.Render(fmt.Sprintf("  ➔  %s\n", wifi)))
+			} else {
+				s.WriteString(fmt.Sprintf("     %s\n", wifi))
+			}
 		}
+		s.WriteString("\n [ Navigation: Up/Down or J/K • Selection: Enter ]\n\n")
+	}
+
+	if m.state == stateInputWiFiPass {
+		s.WriteString(fmt.Sprintf("🔑 ENTER PASSWORD FOR '%s' (hidden):\n%s\n\n", m.wifiSSID, m.textInput.View()))
 	}
 
 	if m.state == stateDeploying || m.done {
@@ -315,7 +395,7 @@ func (m model) View() string {
 	s.WriteString("--------------------------------------------------\n")
 
 	if m.err != nil {
-		s.WriteString("\n" + errorStyle.Render(fmt.Sprintf("Deployment failure: %v", m.err)) + "\n")
+		s.WriteString("\n" + errorStyle.Render(fmt.Sprintf("Deployment failure:\n%v", m.err)) + "\n")
 	} else if m.done {
 		s.WriteString("\n" + successStyle.Render("✨ Finished! Profile targets successfully committed. Rebooting ecosystem...") + "\n")
 	}
@@ -327,31 +407,88 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 	return func() tea.Msg {
 		switch stepIdx {
 		case 0:
-			if err := exec.Command("ykman", "--version").Run(); err != nil {
-				return errMsg{err: fmt.Errorf("yubikey manager (ykman) missing in target system path: %v", err)}
+			// Detect YubiKey
+			out, err := exec.Command("ykman", "--version").CombinedOutput()
+			if err != nil {
+				return errMsg{err: fmt.Errorf("yubikey manager (ykman) missing: %v\nOutput: %s", err, string(out))}
 			}
 			time.Sleep(300 * time.Millisecond)
 			return stepCompleteMsg(stepIdx)
 
 		case 1:
-			if err := exec.Command("nmcli", "radio", "wifi", "on").Run(); err != nil {
-				return errMsg{err: fmt.Errorf("wifi radio error: %v", err)}
+			// Разметка и монтирование диска
+			disk := m.targetDisk
+
+			// 1. Отмонтируем всё, если оно было смонтировано
+			exec.Command("umount", "-R", "/mnt").Run()
+			exec.Command("swapoff", "-a").Run()
+
+			// 2. Создаем новую таблицу GPT и разделы (sgdisk)
+			// Очистка
+			if out, err := exec.Command("sgdisk", "-Z", disk).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to wipe disk: %v\nOutput: %s", err, string(out))}
 			}
-			cmd := exec.Command("nmcli", "dev", "wifi", "connect", m.wifiSSID, "password", m.wifiPass)
-			if err := cmd.Run(); err != nil {
-				return errMsg{err: fmt.Errorf("wifi connection failed: %v", err)}
+			// Boot раздел (512MB)
+			if out, err := exec.Command("sgdisk", "-n", "1:0:+512M", "-t", "1:ef00", "-c", "1:boot", disk).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to create boot partition: %v\nOutput: %s", err, string(out))}
 			}
+			// Root раздел (оставшееся место)
+			if out, err := exec.Command("sgdisk", "-n", "2:0:0", "-t", "2:8300", "-c", "2:root", disk).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to create root partition: %v\nOutput: %s", err, string(out))}
+			}
+
+			// Обновляем ядро информацией о новых разделах
+			exec.Command("partprobe", disk).Run()
+			time.Sleep(2 * time.Second)
+
+			// Определяем имена партиций (nvme0n1p1 vs sda1)
+			part1 := disk + "1"
+			part2 := disk + "2"
+			if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
+				part1 = disk + "p1"
+				part2 = disk + "p2"
+			}
+
+			// 3. Форматируем
+			if out, err := exec.Command("mkfs.fat", "-F", "32", "-n", "boot", part1).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to format boot (fat32): %v\nOutput: %s", err, string(out))}
+			}
+			if out, err := exec.Command("mkfs.ext4", "-F", "-L", "nixos", part2).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to format root (ext4): %v\nOutput: %s", err, string(out))}
+			}
+
+			// 4. Монтируем
+			if out, err := exec.Command("mount", "/dev/disk/by-label/nixos", "/mnt").CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to mount root: %v\nOutput: %s", err, string(out))}
+			}
+			exec.Command("mkdir", "-p", "/mnt/boot").Run()
+			if out, err := exec.Command("mount", "/dev/disk/by-label/boot", "/mnt/boot").CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to mount boot: %v\nOutput: %s", err, string(out))}
+			}
+
 			return stepCompleteMsg(stepIdx)
 
 		case 2:
+			// Connect to Wi-Fi
+			exec.Command("nmcli", "radio", "wifi", "on").Run()
+
+			if m.wifiSSID != "Manual Entry" && m.wifiSSID != "" {
+				out, err := exec.Command("nmcli", "dev", "wifi", "connect", m.wifiSSID, "password", m.wifiPass).CombinedOutput()
+				if err != nil {
+					return errMsg{err: fmt.Errorf("wifi connection failed: %v\nOutput: %s", err, string(out))}
+				}
+			}
+			return stepCompleteMsg(stepIdx)
+
+		case 3:
+			// YubiKey Metadata
 			cmd := exec.Command("ykman", "list")
-			var out bytes.Buffer
-			cmd.Stdout = &out
-			if err := cmd.Run(); err != nil {
-				return errMsg{err: fmt.Errorf("hardware token authentication missing: %v", err)}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				return errMsg{err: fmt.Errorf("hardware token authentication missing: %v\nOutput: %s", err, string(out))}
 			}
 
-			fields := strings.Fields(out.String())
+			fields := strings.Fields(string(out))
 			for i, field := range fields {
 				if field == "Serial:" && i+1 < len(fields) {
 					m.yubiSerial = fields[i+1]
@@ -362,7 +499,8 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			}
 			return stepCompleteMsg(stepIdx)
 
-		case 3:
+		case 4:
+			// Generate Age Key
 			salt := []byte("yubikey-salt-" + m.yubiSerial)
 			rawKey := argon2.IDKey([]byte(m.masterPhrase), salt, 3, 64*1024, 4, 64)
 			hashed := sha256.Sum256(rawKey)
@@ -373,47 +511,44 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			}
 			return stepCompleteMsg(stepIdx)
 
-		case 4:
-			cmd := exec.Command("ykman", "otp", "chalresp", "--generate", "2", "-f")
-			if err := cmd.Run(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to program hardware token slots: %v", err)}
-			}
-			return stepCompleteMsg(stepIdx)
-
 		case 5:
-			targetSysConfigDir := "/mnt/etc/nixos"
-			_ = exec.Command("mkdir", "-p", targetSysConfigDir).Run()
-
-			cmd := exec.Command("nixos-generate-config", "--root", "/mnt", "--show-hardware-config")
-			var out bytes.Buffer
-			cmd.Stdout = &out
-			if err := cmd.Run(); err != nil {
-				return errMsg{err: fmt.Errorf("hardware topology inspection failed: %v", err)}
-			}
-
-			hardwareFile := filepath.Join(targetSysConfigDir, "hardware-configuration.nix")
-			if err := os.WriteFile(hardwareFile, out.Bytes(), 0644); err != nil {
-				return errMsg{err: fmt.Errorf("failed writing dynamic hardware description: %v", err)}
+			// Provision YubiKey
+			out, err := exec.Command("ykman", "otp", "chalresp", "--generate", "2", "-f").CombinedOutput()
+			if err != nil {
+				return errMsg{err: fmt.Errorf("failed to program hardware token slots: %v\nOutput: %s", err, string(out))}
 			}
 			return stepCompleteMsg(stepIdx)
 
 		case 6:
+			// Runtime HW Config
+			targetSysConfigDir := "/mnt/etc/nixos"
+			_ = exec.Command("mkdir", "-p", targetSysConfigDir).Run()
+
+			out, err := exec.Command("nixos-generate-config", "--root", "/mnt", "--show-hardware-config").CombinedOutput()
+			if err != nil {
+				return errMsg{err: fmt.Errorf("hardware topology inspection failed: %v\nOutput: %s", err, string(out))}
+			}
+
+			hardwareFile := filepath.Join(targetSysConfigDir, "hardware-configuration.nix")
+			if err := os.WriteFile(hardwareFile, out, 0644); err != nil {
+				return errMsg{err: fmt.Errorf("failed writing dynamic hardware description: %v", err)}
+			}
+			return stepCompleteMsg(stepIdx)
+
+		case 7:
+			// NixOS Install
 			userHomeDir := fmt.Sprintf("/mnt/home/%s", m.username)
 			nixCoreDir := filepath.Join(userHomeDir, "nix-core")
 			nixHomeDir := filepath.Join(userHomeDir, "nix-home")
 
 			_ = exec.Command("mkdir", "-p", userHomeDir).Run()
 
-			repoCoreURL := "https://github.com/withoutboat/nix-core.git"
-			cloneCoreCmd := exec.Command("git", "clone", repoCoreURL, nixCoreDir)
-			if err := cloneCoreCmd.Run(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to clone nix-core ecosystem: %v", err)}
+			if out, err := exec.Command("git", "clone", "https://github.com/withoutboat/nix-core.git", nixCoreDir).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to clone nix-core: %v\nOutput: %s", err, string(out))}
 			}
 
-			repoHomeURL := "https://github.com/withoutboat/nix-home.git"
-			cloneHomeCmd := exec.Command("git", "clone", repoHomeURL, nixHomeDir)
-			if err := cloneHomeCmd.Run(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to clone nix-home configuration: %v", err)}
+			if out, err := exec.Command("git", "clone", "https://github.com/withoutboat/nix-home.git", nixHomeDir).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to clone nix-home: %v\nOutput: %s", err, string(out))}
 			}
 
 			cpuProfile := detectCPU()
@@ -426,14 +561,18 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("failed to write runtime context data: %v", err)}
 			}
 
+			// Set permissions for the future user (usually UID 1000 in NixOS)
 			_ = exec.Command("chown", "-R", "1000:100", userHomeDir).Run()
 
 			targetFlake := fmt.Sprintf("%s#%s", nixCoreDir, m.hosts[m.selectedHost])
-			cmd := exec.Command("nixos-install", "--flake", targetFlake)
+
+			cmd := exec.Command("nixos-install", "--flake", targetFlake, "--no-root-passwd")
 			cmd.Env = append(os.Environ(), "SOPS_AGE_KEY_FILE=/tmp/age.key")
 
-			if err := cmd.Run(); err != nil {
-				return errMsg{err: fmt.Errorf("nixos-install execution failed: %v", err)}
+			// На этом шаге лог может быть большим, но в случае ошибки мы его увидим
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				return errMsg{err: fmt.Errorf("nixos-install execution failed: %v\nOutput snippet: %s", err, truncateString(string(out), 800))}
 			}
 
 			go func() {
@@ -444,6 +583,51 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 		}
 		return successMsg{}
 	}
+}
+
+// Утилиты для сканирования системы
+func getAvailableDisks() []string {
+	// Игнорируем loop устройства, смотрим только реальные диски
+	out, err := exec.Command("lsblk", "-d", "-n", "-p", "-o", "NAME,SIZE,MODEL").CombinedOutput()
+	if err != nil {
+		return []string{}
+	}
+
+	var disks []string
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines {
+		if !strings.Contains(line, "loop") && strings.TrimSpace(line) != "" {
+			disks = append(disks, strings.TrimSpace(line))
+		}
+	}
+	return disks
+}
+
+func getWiFiNetworks() []string {
+	out, err := exec.Command("nmcli", "-t", "-f", "SSID", "dev", "wifi", "list").CombinedOutput()
+	if err != nil {
+		return []string{}
+	}
+
+	ssidMap := make(map[string]bool)
+	var ssids []string
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		ssid := strings.TrimSpace(line)
+		if ssid != "" && !ssidMap[ssid] && ssid != "--" {
+			ssidMap[ssid] = true
+			ssids = append(ssids, ssid)
+		}
+	}
+	ssids = append(ssids, "Manual Entry")
+	return ssids
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[len(s)-maxLen:]
 }
 
 func main() {
@@ -467,14 +651,12 @@ func detectCPU() string {
 }
 
 func detectGPU() string {
-	cmd := exec.Command("lspci")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
+	out, err := exec.Command("lspci").CombinedOutput()
+	if err != nil {
 		return "none"
 	}
 
-	lines := strings.Split(strings.ToLower(out.String()), "\n")
+	lines := strings.Split(strings.ToLower(string(out)), "\n")
 	hasVGA := false
 	hasNvidia := false
 	hasAMD := false
@@ -517,12 +699,8 @@ func detectGPU() string {
 }
 
 func isNvidiaOpenCapable() bool {
-	cmd := exec.Command("lspci", "-nnk")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	_ = cmd.Run()
-
-	content := strings.ToLower(out.String())
+	out, _ := exec.Command("lspci", "-nnk").CombinedOutput()
+	content := strings.ToLower(string(out))
 	return strings.Contains(content, "rtx 20") ||
 		strings.Contains(content, "rtx 30") ||
 		strings.Contains(content, "rtx 40") ||

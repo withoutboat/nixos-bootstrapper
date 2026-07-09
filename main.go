@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -166,7 +167,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selectedDisk++
 				}
 			case "enter":
-				// Извлекаем только путь к устройству (например, /dev/nvme0n1)
 				m.targetDisk = strings.Split(m.disks[m.selectedDisk], " ")[0]
 				m.state = stateInputUsername
 				m.textInput.Reset()
@@ -192,8 +192,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.state = stateInputPassphrase
 				m.textInput.Reset()
-				m.textInput.Placeholder = "Enter your secure master passphrase (hidden)..."
-				m.textInput.EchoMode = textinput.EchoNone // Слепой ввод пароля
+				m.textInput.Placeholder = "Enter your secure master passphrase..."
+				// ИЗМЕНЕНИЕ 1: Открытый ввод пароля
+				m.textInput.EchoMode = textinput.EchoNormal
 				m.textInput.Focus()
 				m.logs = append(m.logs, fmt.Sprintf("👤 Username registered: %s. Awaiting crypto authority validation...", m.username))
 				return m, nil
@@ -248,8 +249,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.textInput.Placeholder = "Type SSID manually..."
 					m.textInput.EchoMode = textinput.EchoNormal
 				} else {
-					m.textInput.Placeholder = fmt.Sprintf("Enter Wi-Fi Password for '%s' (hidden)...", m.wifiSSID)
-					m.textInput.EchoMode = textinput.EchoNone // Слепой ввод Wi-Fi пароля
+					m.textInput.Placeholder = fmt.Sprintf("Enter Wi-Fi Password for '%s'...", m.wifiSSID)
+					m.textInput.EchoMode = textinput.EchoNormal
 				}
 				m.textInput.Focus()
 				return m, nil
@@ -266,8 +267,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.wifiSSID == "Manual Entry" {
 					m.wifiSSID = strings.TrimSpace(m.textInput.Value())
 					m.textInput.Reset()
-					m.textInput.Placeholder = fmt.Sprintf("Enter Wi-Fi Password for '%s' (hidden)...", m.wifiSSID)
-					m.textInput.EchoMode = textinput.EchoNone
+					m.textInput.Placeholder = fmt.Sprintf("Enter Wi-Fi Password for '%s'...", m.wifiSSID)
+					m.textInput.EchoMode = textinput.EchoNormal
 					return m, nil
 				} else {
 					m.wifiPass = m.textInput.Value()
@@ -355,7 +356,7 @@ func (m model) View() string {
 	}
 
 	if m.state == stateInputPassphrase {
-		s.WriteString(fmt.Sprintf("🔑 MASTER PASSPHRASE (hidden): %s\n\n", m.textInput.View()))
+		s.WriteString(fmt.Sprintf("🔑 MASTER PASSPHRASE: %s\n\n", m.textInput.View()))
 	}
 
 	if m.state == stateSelectWiFi {
@@ -371,7 +372,7 @@ func (m model) View() string {
 	}
 
 	if m.state == stateInputWiFiPass {
-		s.WriteString(fmt.Sprintf("🔑 ENTER PASSWORD FOR '%s' (hidden):\n%s\n\n", m.wifiSSID, m.textInput.View()))
+		s.WriteString(fmt.Sprintf("🔑 ENTER PASSWORD FOR '%s':\n%s\n\n", m.wifiSSID, m.textInput.View()))
 	}
 
 	if m.state == stateDeploying || m.done {
@@ -407,7 +408,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 	return func() tea.Msg {
 		switch stepIdx {
 		case 0:
-			// Detect YubiKey
 			out, err := exec.Command("ykman", "--version").CombinedOutput()
 			if err != nil {
 				return errMsg{err: fmt.Errorf("yubikey manager (ykman) missing: %v\nOutput: %s", err, string(out))}
@@ -416,32 +416,24 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			return stepCompleteMsg(stepIdx)
 
 		case 1:
-			// Разметка и монтирование диска
 			disk := m.targetDisk
 
-			// 1. Отмонтируем всё, если оно было смонтировано
 			exec.Command("umount", "-R", "/mnt").Run()
 			exec.Command("swapoff", "-a").Run()
 
-			// 2. Создаем новую таблицу GPT и разделы (sgdisk)
-			// Очистка
 			if out, err := exec.Command("sgdisk", "-Z", disk).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to wipe disk: %v\nOutput: %s", err, string(out))}
 			}
-			// Boot раздел (512MB)
 			if out, err := exec.Command("sgdisk", "-n", "1:0:+512M", "-t", "1:ef00", "-c", "1:boot", disk).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to create boot partition: %v\nOutput: %s", err, string(out))}
 			}
-			// Root раздел (оставшееся место)
 			if out, err := exec.Command("sgdisk", "-n", "2:0:0", "-t", "2:8300", "-c", "2:root", disk).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to create root partition: %v\nOutput: %s", err, string(out))}
 			}
 
-			// Обновляем ядро информацией о новых разделах
 			exec.Command("partprobe", disk).Run()
 			time.Sleep(2 * time.Second)
 
-			// Определяем имена партиций (nvme0n1p1 vs sda1)
 			part1 := disk + "1"
 			part2 := disk + "2"
 			if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
@@ -449,7 +441,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				part2 = disk + "p2"
 			}
 
-			// 3. Форматируем
 			if out, err := exec.Command("mkfs.fat", "-F", "32", "-n", "boot", part1).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to format boot (fat32): %v\nOutput: %s", err, string(out))}
 			}
@@ -457,7 +448,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("failed to format root (ext4): %v\nOutput: %s", err, string(out))}
 			}
 
-			// 4. Монтируем
 			if out, err := exec.Command("mount", "/dev/disk/by-label/nixos", "/mnt").CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to mount root: %v\nOutput: %s", err, string(out))}
 			}
@@ -469,7 +459,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			return stepCompleteMsg(stepIdx)
 
 		case 2:
-			// Connect to Wi-Fi
 			exec.Command("nmcli", "radio", "wifi", "on").Run()
 
 			if m.wifiSSID != "Manual Entry" && m.wifiSSID != "" {
@@ -481,7 +470,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			return stepCompleteMsg(stepIdx)
 
 		case 3:
-			// YubiKey Metadata
 			cmd := exec.Command("ykman", "list")
 			out, err := cmd.CombinedOutput()
 			if err != nil {
@@ -500,7 +488,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			return stepCompleteMsg(stepIdx)
 
 		case 4:
-			// Generate Age Key
 			salt := []byte("yubikey-salt-" + m.yubiSerial)
 			rawKey := argon2.IDKey([]byte(m.masterPhrase), salt, 3, 64*1024, 4, 64)
 			hashed := sha256.Sum256(rawKey)
@@ -512,7 +499,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			return stepCompleteMsg(stepIdx)
 
 		case 5:
-			// Provision YubiKey
 			out, err := exec.Command("ykman", "otp", "chalresp", "--generate", "2", "-f").CombinedOutput()
 			if err != nil {
 				return errMsg{err: fmt.Errorf("failed to program hardware token slots: %v\nOutput: %s", err, string(out))}
@@ -520,7 +506,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			return stepCompleteMsg(stepIdx)
 
 		case 6:
-			// Runtime HW Config
 			targetSysConfigDir := "/mnt/etc/nixos"
 			_ = exec.Command("mkdir", "-p", targetSysConfigDir).Run()
 
@@ -536,7 +521,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			return stepCompleteMsg(stepIdx)
 
 		case 7:
-			// NixOS Install
 			userHomeDir := fmt.Sprintf("/mnt/home/%s", m.username)
 			nixCoreDir := filepath.Join(userHomeDir, "nix-core")
 			nixHomeDir := filepath.Join(userHomeDir, "nix-home")
@@ -561,7 +545,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("failed to write runtime context data: %v", err)}
 			}
 
-			// Set permissions for the future user (usually UID 1000 in NixOS)
 			_ = exec.Command("chown", "-R", "1000:100", userHomeDir).Run()
 
 			targetFlake := fmt.Sprintf("%s#%s", nixCoreDir, m.hosts[m.selectedHost])
@@ -569,7 +552,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			cmd := exec.Command("nixos-install", "--flake", targetFlake, "--no-root-passwd")
 			cmd.Env = append(os.Environ(), "SOPS_AGE_KEY_FILE=/tmp/age.key")
 
-			// На этом шаге лог может быть большим, но в случае ошибки мы его увидим
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				return errMsg{err: fmt.Errorf("nixos-install execution failed: %v\nOutput snippet: %s", err, truncateString(string(out), 800))}
@@ -585,9 +567,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 	}
 }
 
-// Утилиты для сканирования системы
 func getAvailableDisks() []string {
-	// Игнорируем loop устройства, смотрим только реальные диски
 	out, err := exec.Command("lsblk", "-d", "-n", "-p", "-o", "NAME,SIZE,MODEL").CombinedOutput()
 	if err != nil {
 		return []string{}

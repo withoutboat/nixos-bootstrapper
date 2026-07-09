@@ -32,6 +32,7 @@ const (
 	stateSelectHost sessionState = iota
 	stateInputUsername
 	stateInputPassphrase
+	stateInputWiFi
 	stateDeploying
 )
 
@@ -54,6 +55,8 @@ type model struct {
 	textInput    textinput.Model
 	username     string
 	masterPhrase string
+	wifiSSID     string
+	wifiPass     string
 	yubiSerial   string
 	done         bool
 	err          error
@@ -90,9 +93,10 @@ func initialModel() model {
 		selectedHost: 0,
 		steps: []installStep{
 			{name: "Detect hardware storage & YubiKey presence", log: "Pending..."},
+			{name: "Connect to Wi-Fi", log: "Pending..."},
 			{name: "Extract YubiKey metadata for dynamic salt", log: "Pending..."},
 			{name: "Generate deterministic transient age key (Argon2id)", log: "Pending..."},
-			{name: "Provision YubiKey Slot 2 (Challenge-Response configuration)", log: "Pending..."},
+			{name: "Provision YubiKey Slot 2 (Challenge-Response)", log: "Pending..."},
 			{name: "Generate runtime Hardware Configuration", log: "Pending..."},
 			{name: "Execute secure encrypted nixos-install deployment", log: "Pending..."},
 		},
@@ -172,9 +176,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.err = fmt.Errorf("passphrase metrics suboptimal: minimum 8 characters required")
 					return m, nil
 				}
-				m.state = stateDeploying
-				m.logs = append(m.logs, "🚀 Crypto signature confirmed. Initiating deployment sequence...")
-				return m, m.runStep(0)
+				m.state = stateInputWiFi
+				m.textInput.Reset()
+				m.textInput.Placeholder = "Enter Wi-Fi SSID..."
+				m.textInput.EchoMode = textinput.EchoNormal
+				m.textInput.Focus()
+				m.logs = append(m.logs, "🚀 Crypto signature confirmed. Awaiting network configuration...")
+				return m, nil
+			}
+		}
+		m.textInput, cmd = m.textInput.Update(msg)
+		return m, cmd
+
+	case stateInputWiFi:
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "enter":
+				if m.wifiSSID == "" {
+					m.wifiSSID = strings.TrimSpace(m.textInput.Value())
+					if m.wifiSSID == "" {
+						m.err = fmt.Errorf("SSID cannot be empty")
+						return m, nil
+					}
+					m.textInput.Reset()
+					m.textInput.Placeholder = "Enter Wi-Fi Password..."
+					m.textInput.EchoMode = textinput.EchoPassword
+					return m, nil
+				} else {
+					m.wifiPass = m.textInput.Value()
+					m.state = stateDeploying
+					m.logs = append(m.logs, "🌐 Network details registered. Initiating deployment sequence...")
+					return m, m.runStep(0)
+				}
 			}
 		}
 		m.textInput, cmd = m.textInput.Update(msg)
@@ -204,7 +240,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.progress.SetPercent(1.0)
 			}
 
-			return tea.Batch(m.progress.SetPercent(pct), m.runStep(nextStep))
+			return m, tea.Batch(m.progress.SetPercent(pct), m.runStep(nextStep))
 
 		case errMsg:
 			m.err = msg.err
@@ -237,25 +273,33 @@ func (m model) View() string {
 		s.WriteString("\n [ Navigation: Up/Down or J/K • Selection: Enter ]\n\n")
 	}
 
-	if m.state == stateInputUsername || m.state == stateInputPassphrase || m.state == stateDeploying {
-		for i, step := range m.steps {
-			if i < m.currentStep {
-				s.WriteString(fmt.Sprintf("  [✓] %s\n", step.name))
-			} else if i == m.currentStep && !m.done && m.state == stateDeploying {
-				s.WriteString(fmt.Sprintf("  [➔] %s — %s\n", step.name, statusStyle.Render(step.log)))
-			} else {
-				s.WriteString(fmt.Sprintf("  [ ] %s\n", step.name))
-			}
-		}
-		s.WriteString("\n " + m.progress.View() + "\n\n")
-	}
-
 	if m.state == stateInputUsername {
 		s.WriteString(fmt.Sprintf("👤 TARGET USERNAME: %s\n\n", m.textInput.View()))
 	}
 
 	if m.state == stateInputPassphrase {
 		s.WriteString(fmt.Sprintf("🔑 MASTER PASSPHRASE: %s\n\n", m.textInput.View()))
+	}
+
+	if m.state == stateInputWiFi {
+		if m.wifiSSID == "" {
+			s.WriteString(fmt.Sprintf("📶 ENTER WI-FI SSID:\n%s\n\n", m.textInput.View()))
+		} else {
+			s.WriteString(fmt.Sprintf("🔑 ENTER PASSWORD FOR '%s':\n%s\n\n", m.wifiSSID, m.textInput.View()))
+		}
+	}
+
+	if m.state == stateDeploying || m.done {
+		for i, step := range m.steps {
+			if i < m.currentStep {
+				s.WriteString(fmt.Sprintf("  [✓] %s\n", step.name))
+			} else if i == m.currentStep && !m.done {
+				s.WriteString(fmt.Sprintf("  [➔] %s — %s\n", step.name, statusStyle.Render(step.log)))
+			} else {
+				s.WriteString(fmt.Sprintf("  [ ] %s\n", step.name))
+			}
+		}
+		s.WriteString("\n " + m.progress.View() + "\n\n")
 	}
 
 	s.WriteString("📝 Security Infrastructure Logs:\n")
@@ -285,6 +329,16 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			return stepCompleteMsg(stepIdx)
 
 		case 1:
+			if err := exec.Command("nmcli", "radio", "wifi", "on").Run(); err != nil {
+				return errMsg{err: fmt.Errorf("wifi radio error: %v", err)}
+			}
+			cmd := exec.Command("nmcli", "dev", "wifi", "connect", m.wifiSSID, "password", m.wifiPass)
+			if err := cmd.Run(); err != nil {
+				return errMsg{err: fmt.Errorf("wifi connection failed: %v", err)}
+			}
+			return stepCompleteMsg(stepIdx)
+
+		case 2:
 			cmd := exec.Command("ykman", "list")
 			var out bytes.Buffer
 			cmd.Stdout = &out
@@ -303,7 +357,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			}
 			return stepCompleteMsg(stepIdx)
 
-		case 2:
+		case 3:
 			salt := []byte("yubikey-salt-" + m.yubiSerial)
 			rawKey := argon2.IDKey([]byte(m.masterPhrase), salt, 3, 64*1024, 4, 64)
 			hashed := sha256.Sum256(rawKey)
@@ -314,14 +368,14 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			}
 			return stepCompleteMsg(stepIdx)
 
-		case 3:
+		case 4:
 			cmd := exec.Command("ykman", "otp", "chalresp", "--generate", "2", "-f")
 			if err := cmd.Run(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to program hardware token slots: %v", err)}
 			}
 			return stepCompleteMsg(stepIdx)
 
-		case 4:
+		case 5:
 			targetSysConfigDir := "/mnt/etc/nixos"
 			_ = exec.Command("mkdir", "-p", targetSysConfigDir).Run()
 
@@ -338,7 +392,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			}
 			return stepCompleteMsg(stepIdx)
 
-		case 5:
+		case 6:
 			userHomeDir := fmt.Sprintf("/mnt/home/%s/nix-core", m.username)
 			_ = exec.Command("mkdir", "-p", filepath.Dir(userHomeDir)).Run()
 
@@ -353,7 +407,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			nvidiaOpen := isNvidiaOpenCapable()
 
 			userContextFile := filepath.Join(userHomeDir, "hosts", "runtime-context.nix")
-			userContextContent := fmt.Sprintf("{\n  username = \"%s\";\n  cpu = \"%s\";\n  gpu = \"%s\";\n}\n nvidiaOpen = \"%s\";\n}\n", m.username, cpuProfile, gpuProfile, nvidiaOpen)
+			userContextContent := fmt.Sprintf("{\n  username = \"%s\";\n  cpu = \"%s\";\n  gpu = \"%s\";\n  nvidiaOpen = %t;\n}\n", m.username, cpuProfile, gpuProfile, nvidiaOpen)
 			if err := os.WriteFile(userContextFile, []byte(userContextContent), 0644); err != nil {
 				return errMsg{err: fmt.Errorf("failed to write runtime context data: %v", err)}
 			}
@@ -459,5 +513,5 @@ func isNvidiaOpenCapable() bool {
 	return strings.Contains(content, "rtx 20") ||
 		strings.Contains(content, "rtx 30") ||
 		strings.Contains(content, "rtx 40") ||
-		strings.Contains(content, "rtx 50") // Будущее
+		strings.Contains(content, "rtx 50")
 }

@@ -446,6 +446,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			if out, err := exec.Command("mkfs.ext4", "-F", "-L", "nixos", part2).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to format root (ext4): %v\nOutput: %s", err, string(out))}
 			}
+			exec.Command("udevadm", "settle").Run()
 
 			if out, err := exec.Command("mount", "/dev/disk/by-label/nixos", "/mnt").CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to mount root: %v\nOutput: %s", err, string(out))}

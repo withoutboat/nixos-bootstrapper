@@ -93,7 +93,7 @@ func initialModel() model {
 		selectedHost: 0,
 		steps: []installStep{
 			{name: "Detect hardware storage & YubiKey presence", log: "Pending..."},
-			{name: "Connect to Wi-Fi", log: "Pending..."},
+			{name: "Connect to Wi-Fi Network", log: "Pending..."},
 			{name: "Extract YubiKey metadata for dynamic salt", log: "Pending..."},
 			{name: "Generate deterministic transient age key (Argon2id)", log: "Pending..."},
 			{name: "Provision YubiKey Slot 2 (Challenge-Response)", log: "Pending..."},
@@ -393,29 +393,37 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			return stepCompleteMsg(stepIdx)
 
 		case 6:
-			userHomeDir := fmt.Sprintf("/mnt/home/%s/nix-core", m.username)
-			_ = exec.Command("mkdir", "-p", filepath.Dir(userHomeDir)).Run()
+			userHomeDir := fmt.Sprintf("/mnt/home/%s", m.username)
+			nixCoreDir := filepath.Join(userHomeDir, "nix-core")
+			nixHomeDir := filepath.Join(userHomeDir, "nix-home")
 
-			repoURL := "https://github.com/MarkovVA/nix-core.git"
-			cloneCmd := exec.Command("git", "clone", repoURL, userHomeDir)
-			if err := cloneCmd.Run(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to clone infrastructure ecosystem into user home: %v", err)}
+			_ = exec.Command("mkdir", "-p", userHomeDir).Run()
+
+			repoCoreURL := "https://github.com/withoutboat/nix-core.git"
+			cloneCoreCmd := exec.Command("git", "clone", repoCoreURL, nixCoreDir)
+			if err := cloneCoreCmd.Run(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to clone nix-core ecosystem: %v", err)}
+			}
+
+			repoHomeURL := "https://github.com/withoutboat/nix-home.git"
+			cloneHomeCmd := exec.Command("git", "clone", repoHomeURL, nixHomeDir)
+			if err := cloneHomeCmd.Run(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to clone nix-home configuration: %v", err)}
 			}
 
 			cpuProfile := detectCPU()
 			gpuProfile := detectGPU()
 			nvidiaOpen := isNvidiaOpenCapable()
 
-			userContextFile := filepath.Join(userHomeDir, "hosts", "runtime-context.nix")
+			userContextFile := filepath.Join(nixCoreDir, "hosts", "runtime-context.nix")
 			userContextContent := fmt.Sprintf("{\n  username = \"%s\";\n  cpu = \"%s\";\n  gpu = \"%s\";\n  nvidiaOpen = %t;\n}\n", m.username, cpuProfile, gpuProfile, nvidiaOpen)
 			if err := os.WriteFile(userContextFile, []byte(userContextContent), 0644); err != nil {
 				return errMsg{err: fmt.Errorf("failed to write runtime context data: %v", err)}
 			}
 
-			chownTarget := fmt.Sprintf("/mnt/home/%s", m.username)
-			_ = exec.Command("chown", "-R", "1000:100", chownTarget).Run()
+			_ = exec.Command("chown", "-R", "1000:100", userHomeDir).Run()
 
-			targetFlake := fmt.Sprintf("%s#%s", userHomeDir, m.hosts[m.selectedHost])
+			targetFlake := fmt.Sprintf("%s#%s", nixCoreDir, m.hosts[m.selectedHost])
 			cmd := exec.Command("nixos-install", "--flake", targetFlake)
 			cmd.Env = append(os.Environ(), "SOPS_AGE_KEY_FILE=/tmp/age.key")
 

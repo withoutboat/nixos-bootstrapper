@@ -545,8 +545,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("failed to write runtime context data: %v", err)}
 			}
 
-			_ = exec.Command("chown", "-R", "1000:100", userHomeDir).Run()
-
 			targetFlake := fmt.Sprintf("%s#%s", nixCoreDir, m.hosts[m.selectedHost])
 
 			cmd := exec.Command("nixos-install", "--flake", targetFlake, "--no-root-passwd")
@@ -556,6 +554,8 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			if err != nil {
 				return errMsg{err: fmt.Errorf("nixos-install execution failed: %v\nOutput snippet: %s", err, truncateString(string(out), 800))}
 			}
+
+			_ = exec.Command("chown", "-R", "1000:100", userHomeDir).Run()
 
 			go func() {
 				time.Sleep(3 * time.Second)

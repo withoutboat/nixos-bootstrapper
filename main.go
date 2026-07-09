@@ -348,10 +348,14 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("failed to clone infrastructure ecosystem into user home: %v", err)}
 			}
 
-			userContextFile := filepath.Join(userHomeDir, "hosts", "user-context.nix")
-			userContextContent := fmt.Sprintf("{ username = \"%s\"; }\n", m.username)
+			cpuProfile := detectCPU()
+			gpuProfile := detectGPU()
+			nvidiaOpen := isNvidiaOpenCapable()
+
+			userContextFile := filepath.Join(userHomeDir, "hosts", "runtime-context.nix")
+			userContextContent := fmt.Sprintf("{\n  username = \"%s\";\n  cpu = \"%s\";\n  gpu = \"%s\";\n}\n nvidiaOpen = \"%s\";\n}\n", m.username, cpuProfile, gpuProfile, nvidiaOpen)
 			if err := os.WriteFile(userContextFile, []byte(userContextContent), 0644); err != nil {
-				return errMsg{err: fmt.Errorf("failed to write user context runtime data: %v", err)}
+				return errMsg{err: fmt.Errorf("failed to write runtime context data: %v", err)}
 			}
 
 			chownTarget := fmt.Sprintf("/mnt/home/%s", m.username)
@@ -381,4 +385,79 @@ func main() {
 		fmt.Printf("Fatal runtime error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func detectCPU() string {
+	data, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return "amd"
+	}
+	content := strings.ToLower(string(data))
+	if strings.Contains(content, "intel") {
+		return "intel"
+	}
+	return "amd"
+}
+
+func detectGPU() string {
+	cmd := exec.Command("lspci")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return "none"
+	}
+
+	lines := strings.Split(strings.ToLower(out.String()), "\n")
+	hasVGA := false
+	hasNvidia := false
+	hasAMD := false
+	hasIntel := false
+
+	for _, line := range lines {
+		if strings.Contains(line, "vga compatible") || strings.Contains(line, "3d controller") {
+			hasVGA = true
+			if strings.Contains(line, "nvidia") {
+				hasNvidia = true
+			}
+			if strings.Contains(line, "amd") || strings.Contains(line, "ati") {
+				hasAMD = true
+			}
+			if strings.Contains(line, "intel") {
+				hasIntel = true
+			}
+		}
+	}
+
+	if !hasVGA {
+		return "none"
+	}
+	if hasNvidia && hasAMD {
+		return "hybrid-amd-nvidia"
+	}
+	if hasNvidia && hasIntel {
+		return "intel-nvidia"
+	}
+	if hasNvidia {
+		return "nvidia"
+	}
+	if hasAMD {
+		return "amd"
+	}
+	if hasIntel {
+		return "intel"
+	}
+	return "none"
+}
+
+func isNvidiaOpenCapable() bool {
+	cmd := exec.Command("lspci", "-nnk")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	_ = cmd.Run()
+
+	content := strings.ToLower(out.String())
+	return strings.Contains(content, "rtx 20") ||
+		strings.Contains(content, "rtx 30") ||
+		strings.Contains(content, "rtx 40") ||
+		strings.Contains(content, "rtx 50") // Будущее
 }

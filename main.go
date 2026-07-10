@@ -22,7 +22,7 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-var BuildDate = "version 4 (Multi-EFI)"
+var BuildDate = "version 5 (Multi-EFI)"
 
 var (
 	titleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F5D4")).Bold(true).MarginLeft(2)

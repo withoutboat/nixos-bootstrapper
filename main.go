@@ -750,6 +750,13 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				ch <- stepCompleteMsg(7)
 			}(msgChan, userHomeDir, buildDir)
 
+			m.logs = append(m.logs, "⏳ Awaiting YubiKey touch to generate U2F mapping...")
+			mappingCmd := "pamu2fcfg > /etc/u2f_mappings"
+			if out, err := exec.Command("chroot", "/mnt", "sh", "-c", mappingCmd).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to generate u2f mapping: %v\nOutput: %s", err, string(out))}
+			}
+			m.logs = append(m.logs, "✅ U2F mapping generated successfully.")
+
 			return installStartedMsg{ch: msgChan}
 		}
 		return successMsg{}

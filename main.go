@@ -732,6 +732,13 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("failed to start deployment: %v", err)}
 			}
 
+			m.logs = append(m.logs, "🔐 Enrolling YubiKey to LUKS slot (FIDO2)...")
+			enrollCmd := "systemd-cryptenroll --fido2-device=auto --fido2-with-user-presence=yes /dev/disk/by-partlabel/disk-main-luks"
+			if out, err := exec.Command("sh", "-c", enrollCmd).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to enroll YubiKey to LUKS: %v\nOutput: %s", err, string(out))}
+			}
+			m.logs = append(m.logs, "✅ YubiKey enrolled to LUKS successfully.")
+
 			msgChan := make(chan tea.Msg)
 			go func(ch chan tea.Msg, homeDir string, bDir string) {
 				scanner := bufio.NewScanner(stdout)

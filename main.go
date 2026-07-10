@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -67,12 +68,14 @@ type model struct {
 	done         bool
 	err          error
 	logs         []string
+	msgChan      chan tea.Msg
 }
 
 type stepCompleteMsg int
 type logMsg string
 type successMsg struct{}
 type errMsg struct{ err error }
+type installStartedMsg struct{ ch chan tea.Msg }
 
 func initialModel() model {
 	ti := textinput.New()
@@ -286,10 +289,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 
+		case installStartedMsg:
+			m.msgChan = msg.ch
+			return m, checkMsgChannel(m.msgChan)
+
 		case logMsg:
-			m.logs = append(m.logs, string(msg))
-			if len(m.logs) > 6 {
-				m.logs = m.logs[1:]
+			cleanLine := strings.TrimSpace(string(msg))
+			if cleanLine != "" {
+				if m.currentStep < len(m.steps) {
+					m.steps[m.currentStep].log = cleanLine
+				}
+				m.logs = append(m.logs, cleanLine)
+				if len(m.logs) > 10 {
+					m.logs = m.logs[1:]
+				}
+			}
+			if m.msgChan != nil {
+				return m, checkMsgChannel(m.msgChan)
 			}
 			return m, nil
 
@@ -400,6 +416,12 @@ func (m model) View() string {
 	}
 
 	return s.String()
+}
+
+func checkMsgChannel(ch chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		return <-ch
+	}
 }
 
 func (m *model) runStep(stepIdx int) tea.Cmd {
@@ -558,18 +580,40 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			cmd := exec.Command("nixos-install", "--flake", targetFlake, "--no-root-passwd")
 			cmd.Env = append(os.Environ(), "SOPS_AGE_KEY_FILE=/tmp/age.key")
 
-			out, err := cmd.CombinedOutput()
+			stdout, err := cmd.StdoutPipe()
 			if err != nil {
-				return errMsg{err: fmt.Errorf("nixos-install execution failed: %v\nOutput snippet: %s", err, truncateString(string(out), 800))}
+				return errMsg{err: fmt.Errorf("failed to init log stream pipe: %v", err)}
+			}
+			cmd.Stderr = cmd.Stdout
+
+			if err := cmd.Start(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to start deployment command: %v", err)}
 			}
 
-			_ = exec.Command("chown", "-R", "1000:100", userHomeDir).Run()
+			msgChan := make(chan tea.Msg)
 
-			go func() {
-				time.Sleep(3 * time.Second)
-				_ = exec.Command("reboot").Run()
-			}()
-			return stepCompleteMsg(stepIdx)
+			go func(ch chan tea.Msg, homeDir string) {
+				scanner := bufio.NewScanner(stdout)
+				for scanner.Scan() {
+					ch <- logMsg(scanner.Text())
+				}
+
+				if err := cmd.Wait(); err != nil {
+					ch <- errMsg{err: fmt.Errorf("nixos-install deployment broke: %v", err)}
+					return
+				}
+
+				_ = exec.Command("chown", "-R", "1000:100", homeDir).Run()
+
+				go func() {
+					time.Sleep(3 * time.Second)
+					_ = exec.Command("reboot").Run()
+				}()
+
+				ch <- stepCompleteMsg(7)
+			}(msgChan, userHomeDir)
+
+			return installStartedMsg{ch: msgChan}
 		}
 		return successMsg{}
 	}

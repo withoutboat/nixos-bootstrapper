@@ -21,7 +21,7 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-var BuildDate = "version 1"
+var BuildDate = "version 2"
 
 var (
 	titleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F5D4")).Bold(true).MarginLeft(2)
@@ -635,9 +635,22 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			cpuProfile := detectCPU()
 			gpuProfile := detectGPU()
 			nvidiaOpen := isNvidiaOpenCapable()
+
+			intelID, nvidiaID := getBusIDs()
+
 			if lastBrace != -1 {
-				injection := fmt.Sprintf("\n  _module.args.spec = {\n    username = \"%s\";\n    cpu = \"%s\";\n    gpu = \"%s\";\n    nvidiaOpen = %t;\n  };\n",
-					m.username, cpuProfile, gpuProfile, nvidiaOpen)
+				injection := fmt.Sprintf(`
+           _module.args.spec = {
+             username = "%s";
+             cpu = "%s";
+             gpu = "%s";
+             nvidiaOpen = %t;
+           };
+           hardware.nvidia.prime = {
+             intelBusId = "%s";
+             nvidiaBusId = "%s";
+           };
+          `, m.username, cpuProfile, gpuProfile, nvidiaOpen, intelID, nvidiaID)
 				configStr = configStr[:lastBrace] + injection + configStr[lastBrace:]
 			}
 			hardwareFile := filepath.Join(targetSysConfigDir, "hardware-configuration.nix")
@@ -724,9 +737,15 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				for scanner.Scan() {
 					ch <- logMsg(scanner.Text())
 				}
-				cmd.Wait()
+
+				if err := cmd.Wait(); err != nil {
+					ch <- errMsg{err: fmt.Errorf("nixos-install deployment broke: %v", err)}
+					return
+				}
+
 				_ = exec.Command("chown", "-R", "1000:100", homeDir).Run()
 				_ = exec.Command("rm", "-rf", bDir).Run()
+
 				ch <- stepCompleteMsg(7)
 			}(msgChan, userHomeDir, buildDir)
 
@@ -845,4 +864,26 @@ func isNvidiaOpenCapable() bool {
 	out, _ := exec.Command("lspci", "-nnk").CombinedOutput()
 	content := strings.ToLower(string(out))
 	return strings.Contains(content, "rtx 20") || strings.Contains(content, "rtx 30") || strings.Contains(content, "rtx 40") || strings.Contains(content, "rtx 50")
+}
+
+func getBusIDs() (string, string) {
+	out, _ := exec.Command("lspci", "-nn").CombinedOutput()
+	lines := strings.Split(string(out), "\n")
+
+	var intelID, nvidiaID string
+	for _, line := range lines {
+		l := strings.ToLower(line)
+		if strings.Contains(l, "vga") || strings.Contains(l, "3d") {
+			parts := strings.Split(line, " ")
+			bus := parts[0]
+			formatted := "PCI:" + strings.ReplaceAll(strings.TrimLeft(bus, "0:"), ":", ":")
+
+			if strings.Contains(l, "nvidia") {
+				nvidiaID = formatted
+			} else if strings.Contains(l, "intel") {
+				intelID = formatted
+			}
+		}
+	}
+	return intelID, nvidiaID
 }

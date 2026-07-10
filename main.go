@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,7 +22,7 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-var BuildDate = "version 2"
+var BuildDate = "version 3"
 
 var (
 	titleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F5D4")).Bold(true).MarginLeft(2)
@@ -875,21 +876,17 @@ func getBusIDs() (string, string) {
 		l := strings.ToLower(line)
 		if strings.Contains(l, "vga") || strings.Contains(l, "3d") {
 			parts := strings.Split(line, " ")
-			bus := parts[0]
+			bus := parts[0] // "01:00.0"
 
 			segments := strings.Split(bus, ":")
 			if len(segments) < 2 {
 				continue
 			}
 
-			busNum := strings.TrimLeft(segments[0], "0")
-			if busNum == "" {
-				busNum = "0"
-			}
-			devNum := strings.TrimLeft(segments[1], "0")
-			if devNum == "" {
-				devNum = "0"
-			}
+			devAndFunc := strings.Split(segments[1], ".")
+
+			busNum := fmt.Sprintf("%d", parseInt(segments[0]))
+			devNum := fmt.Sprintf("%d", parseInt(devAndFunc[0]))
 
 			formatted := fmt.Sprintf("PCI:%s:%s:0", busNum, devNum)
 
@@ -901,4 +898,9 @@ func getBusIDs() (string, string) {
 		}
 	}
 	return intelID, nvidiaID
+}
+
+func parseInt(s string) int64 {
+	val, _ := strconv.ParseInt(s, 16, 64)
+	return val
 }

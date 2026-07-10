@@ -535,10 +535,25 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("hardware topology inspection failed: %v\nOutput: %s", err, string(out))}
 			}
 
-			hardwareFile := filepath.Join(targetSysConfigDir, "hardware-configuration.nix")
-			if err := os.WriteFile(hardwareFile, out, 0644); err != nil {
-				return errMsg{err: fmt.Errorf("failed writing dynamic hardware description: %v", err)}
+			configStr := string(out)
+			lastBrace := strings.LastIndex(configStr, "}")
+
+			cpuProfile := detectCPU()
+			gpuProfile := detectGPU()
+			nvidiaOpen := isNvidiaOpenCapable()
+
+			if lastBrace != -1 {
+				injection := fmt.Sprintf("\n  _module.args.installer = {\n    username = \"%s\";\n    cpu = \"%s\";\n    gpu = \"%s\";\n    nvidiaOpen = %t;\n  };\n",
+					m.username, cpuProfile, gpuProfile, nvidiaOpen)
+
+				configStr = configStr[:lastBrace] + injection + configStr[lastBrace:]
 			}
+
+			hardwareFile := filepath.Join(targetSysConfigDir, "hardware-configuration.nix")
+			if err := os.WriteFile(hardwareFile, []byte(configStr), 0644); err != nil {
+				return errMsg{err: fmt.Errorf("failed writing hardware-configuration.nix: %v", err)}
+			}
+
 			return stepCompleteMsg(stepIdx)
 
 		case 7:
@@ -556,23 +571,9 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("failed to clone nix-home: %v\nOutput: %s", err, string(out))}
 			}
 
-			cpuProfile := detectCPU()
-			gpuProfile := detectGPU()
-			nvidiaOpen := isNvidiaOpenCapable()
-
-			userContextFile := filepath.Join(nixCoreDir, "hosts", "runtime-context.nix")
-			userContextContent := fmt.Sprintf("{\n  username = \"%s\";\n  cpu = \"%s\";\n  gpu = \"%s\";\n  nvidiaOpen = %t;\n}\n", m.username, cpuProfile, gpuProfile, nvidiaOpen)
-			if err := os.WriteFile(userContextFile, []byte(userContextContent), 0644); err != nil {
-				return errMsg{err: fmt.Errorf("failed to write runtime context data: %v", err)}
-			}
-
-			targetModulesDir := filepath.Join(nixCoreDir, "hosts", "modules")
-			if err := os.MkdirAll(targetModulesDir, 0755); err != nil {
-				return errMsg{err: fmt.Errorf("failed to create target modules directory: %v", err)}
-			}
-
-			if out, err := exec.Command("cp", "/mnt/etc/nixos/hardware-configuration.nix", filepath.Join(targetModulesDir, "hardware.nix")).CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to copy hardware config into flake repo: %v\nOutput: %s", err, string(out))}
+			targetHardwareFile := filepath.Join(nixCoreDir, "hardware.nix")
+			if out, err := exec.Command("cp", "/mnt/etc/nixos/hardware-configuration.nix", targetHardwareFile).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to copy hardware config into flake root: %v\nOutput: %s", err, string(out))}
 			}
 
 			targetFlake := fmt.Sprintf("path:%s#%s", nixCoreDir, m.hosts[m.selectedHost])

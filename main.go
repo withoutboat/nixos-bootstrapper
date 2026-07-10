@@ -876,7 +876,22 @@ func getBusIDs() (string, string) {
 		if strings.Contains(l, "vga") || strings.Contains(l, "3d") {
 			parts := strings.Split(line, " ")
 			bus := parts[0]
-			formatted := "PCI:" + strings.ReplaceAll(strings.TrimLeft(bus, "0:"), ":", ":")
+
+			segments := strings.Split(bus, ":")
+			if len(segments) < 2 {
+				continue
+			}
+
+			busNum := strings.TrimLeft(segments[0], "0")
+			if busNum == "" {
+				busNum = "0"
+			}
+			devNum := strings.TrimLeft(segments[1], "0")
+			if devNum == "" {
+				devNum = "0"
+			}
+
+			formatted := fmt.Sprintf("PCI:%s:%s:0", busNum, devNum)
 
 			if strings.Contains(l, "nvidia") {
 				nvidiaID = formatted

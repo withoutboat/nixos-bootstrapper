@@ -832,18 +832,18 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 					return
 				}
 
+				m.logs = append(m.logs, "⏳ Awaiting YubiKey touch to generate U2F mapping...")
+				mappingCmd := fmt.Sprintf("pamu2fcfg -u %s > /mnt/etc/u2f_mappings", m.username)
+				if out, err := exec.Command("sh", "-c", mappingCmd).CombinedOutput(); err != nil {
+					ch <- errMsg{err: fmt.Errorf("failed to generate u2f mapping: %v\nOutput: %s", err, string(out))}
+				}
+				m.logs = append(m.logs, "✅ U2F mapping generated successfully.")
+
 				_ = exec.Command("chown", "-R", "1000:100", homeDir).Run()
 				_ = exec.Command("rm", "-rf", bDir).Run()
 
 				ch <- stepCompleteMsg(7)
 			}(msgChan, userHomeDir, buildDir)
-
-			m.logs = append(m.logs, "⏳ Awaiting YubiKey touch to generate U2F mapping...")
-			mappingCmd := "pamu2fcfg > /etc/u2f_mappings"
-			if out, err := exec.Command("chroot", "/mnt", "sh", "-c", mappingCmd).CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to generate u2f mapping: %v\nOutput: %s", err, string(out))}
-			}
-			m.logs = append(m.logs, "✅ U2F mapping generated successfully.")
 
 			return installStartedMsg{ch: msgChan}
 		}

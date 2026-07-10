@@ -21,7 +21,7 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-var BuildDate = "unknown"
+var BuildDate = "version 1"
 
 var (
 	titleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F5D4")).Bold(true).MarginLeft(2)
@@ -675,6 +675,8 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			}
 
 			_ = exec.Command("rm", "-rf", filepath.Join(buildDir, ".git")).Run()
+			_ = exec.Command("find", buildDir, "-name", ".gitignore", "-type", "f", "-delete").Run()
+			exec.Command("git", "-C", buildDir, "add", "-A").Run()
 			exec.Command("git", "-C", buildDir, "init").Run()
 			exec.Command("git", "-C", buildDir, "config", "user.name", "bootstrapper").Run()
 			exec.Command("git", "-C", buildDir, "config", "user.email", "boot@strapper.org").Run()
@@ -683,8 +685,18 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("failed to git add: %v\nOutput: %s", err, string(out))}
 			}
 
+			files, _ := exec.Command("git", "-C", buildDir, "ls-files").CombinedOutput()
+			m.logs = append(m.logs, "DEBUG: Files added to Git index:")
+			m.logs = append(m.logs, strings.Split(string(files), "\n")...)
+
 			if debugFiles, err := exec.Command("git", "-C", buildDir, "ls-files").CombinedOutput(); err == nil {
 				m.logs = append(m.logs, "Git index content:\n"+string(debugFiles))
+			}
+
+			if _, err := os.Stat(filepath.Join(buildDir, "hardware.nix")); os.IsNotExist(err) {
+				m.logs = append(m.logs, "FATAL: hardware.nix does not exist in buildDir!")
+			} else {
+				m.logs = append(m.logs, "OK: hardware.nix exists in buildDir")
 			}
 
 			if out, err := exec.Command("git", "-C", buildDir, "commit", "-m", "stable-deterministic-deploy").CombinedOutput(); err != nil {

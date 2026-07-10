@@ -192,7 +192,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = stateInputPassphrase
 				m.textInput.Reset()
 				m.textInput.Placeholder = "Enter your secure master passphrase..."
-				// ИЗМЕНЕНИЕ 1: Открытый ввод пароля
 				m.textInput.EchoMode = textinput.EchoNormal
 				m.textInput.Focus()
 				m.logs = append(m.logs, fmt.Sprintf("👤 Username registered: %s. Awaiting crypto authority validation...", m.username))
@@ -545,7 +544,16 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("failed to write runtime context data: %v", err)}
 			}
 
-			targetFlake := fmt.Sprintf("%s#%s", nixCoreDir, m.hosts[m.selectedHost])
+			targetModulesDir := filepath.Join(nixCoreDir, "hosts", "modules")
+			if err := os.MkdirAll(targetModulesDir, 0755); err != nil {
+				return errMsg{err: fmt.Errorf("failed to create target modules directory: %v", err)}
+			}
+
+			if out, err := exec.Command("cp", "/mnt/etc/nixos/hardware-configuration.nix", filepath.Join(targetModulesDir, "hardware.nix")).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to copy hardware config into flake repo: %v\nOutput: %s", err, string(out))}
+			}
+
+			targetFlake := fmt.Sprintf("path:%s#%s", nixCoreDir, m.hosts[m.selectedHost])
 
 			cmd := exec.Command("nixos-install", "--flake", targetFlake, "--no-root-passwd")
 			cmd.Env = append(os.Environ(), "SOPS_AGE_KEY_FILE=/tmp/age.key")

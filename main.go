@@ -21,6 +21,8 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
+var BuildDate = "unknown"
+
 var (
 	titleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F5D4")).Bold(true).MarginLeft(2)
 	statusStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFF"))
@@ -124,7 +126,7 @@ func initialModel() model {
 		},
 		progress:  progress.New(progress.WithDefaultGradient()),
 		textInput: ti,
-		logs:      []string{"System initialized. Please select target infrastructure profile."},
+		logs:      []string{fmt.Sprintf("System initialized (Build: %s). Please select target infrastructure profile.", BuildDate)},
 	}
 }
 
@@ -379,7 +381,7 @@ func (m model) View() string {
 	var s strings.Builder
 
 	if m.state == stateFailed {
-		s.WriteString("\n" + titleStyle.Render("NixOS Air-Gapped YubiKey Bootstrapper") + "\n\n")
+		s.WriteString("\n" + titleStyle.Render(fmt.Sprintf("NixOS Bootstrapper (Build: %s)", BuildDate)) + "\n\n")
 		s.WriteString(errorStyle.Render("❌ DEPLOYMENT CRASHED!") + "\n\n")
 		s.WriteString(fmt.Sprintf("Reason:\n%v\n\n", errorStyle.Render(m.err.Error())))
 		s.WriteString("─────────────────────────────────────────────────────────────────\n")
@@ -396,7 +398,7 @@ func (m model) View() string {
 	}
 
 	if m.state == stateUpdating {
-		s.WriteString("\n" + titleStyle.Render("NixOS Air-Gapped YubiKey Bootstrapper") + "\n\n")
+		s.WriteString("\n" + titleStyle.Render(fmt.Sprintf("NixOS Bootstrapper (Build: %s)", BuildDate)) + "\n\n")
 		s.WriteString("⏳ " + focusedStyle.Render("Hot-reloading runtime environment on the fly...") + "\n\n")
 		s.WriteString(" • Querying GitHub Releases API (fetching latest production asset)...\n")
 		s.WriteString(" • Extracting tar.gz bundle into volatile memory sandbox (/tmp)...\n")
@@ -405,7 +407,7 @@ func (m model) View() string {
 		return s.String()
 	}
 
-	s.WriteString("\n" + titleStyle.Render("NixOS Air-Gapped YubiKey Bootstrapper") + "\n\n")
+	s.WriteString("\n" + titleStyle.Render(fmt.Sprintf("NixOS Bootstrapper (Build: %s)", BuildDate)) + "\n\n")
 
 	if m.state == stateSelectHost {
 		s.WriteString(" Select Target Host Architecture Profile:\n")
@@ -542,10 +544,8 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 
 		case 1:
 			disk := m.targetDisk
-
 			exec.Command("umount", "-R", "/mnt").Run()
 			exec.Command("swapoff", "-a").Run()
-
 			if out, err := exec.Command("sgdisk", "-Z", disk).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to wipe disk: %v\nOutput: %s", err, string(out))}
 			}
@@ -555,17 +555,14 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			if out, err := exec.Command("sgdisk", "-n", "2:0:0", "-t", "2:8300", "-c", "2:root", disk).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to create root partition: %v\nOutput: %s", err, string(out))}
 			}
-
 			exec.Command("partprobe", disk).Run()
 			time.Sleep(2 * time.Second)
-
 			part1 := disk + "1"
 			part2 := disk + "2"
 			if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
 				part1 = disk + "p1"
 				part2 = disk + "p2"
 			}
-
 			if out, err := exec.Command("mkfs.fat", "-F", "32", "-n", "boot", part1).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to format boot (fat32): %v\nOutput: %s", err, string(out))}
 			}
@@ -573,7 +570,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("failed to format root (ext4): %v\nOutput: %s", err, string(out))}
 			}
 			exec.Command("udevadm", "settle").Run()
-
 			if out, err := exec.Command("mount", "/dev/disk/by-label/nixos", "/mnt").CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to mount root: %v\nOutput: %s", err, string(out))}
 			}
@@ -581,12 +577,10 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			if out, err := exec.Command("mount", "/dev/disk/by-label/boot", "/mnt/boot").CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to mount boot: %v\nOutput: %s", err, string(out))}
 			}
-
 			return stepCompleteMsg(stepIdx)
 
 		case 2:
 			exec.Command("nmcli", "radio", "wifi", "on").Run()
-
 			if m.wifiSSID != "Manual Entry" && m.wifiSSID != "" {
 				out, err := exec.Command("nmcli", "dev", "wifi", "connect", m.wifiSSID, "password", m.wifiPass).CombinedOutput()
 				if err != nil {
@@ -601,7 +595,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			if err != nil {
 				return errMsg{err: fmt.Errorf("hardware token authentication missing: %v\nOutput: %s", err, string(out))}
 			}
-
 			fields := strings.Fields(string(out))
 			for i, field := range fields {
 				if field == "Serial:" && i+1 < len(fields) {
@@ -617,7 +610,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			salt := []byte("yubikey-salt-" + m.yubiSerial)
 			rawKey := argon2.IDKey([]byte(m.masterPhrase), salt, 3, 64*1024, 4, 64)
 			hashed := sha256.Sum256(rawKey)
-
 			ageKeyContent := fmt.Sprintf("# Transient System Deployment Key\nAGE-SECRET-KEY-1%x\n", hashed)
 			if err := os.WriteFile("/tmp/age.key", []byte(ageKeyContent), 0600); err != nil {
 				return errMsg{err: fmt.Errorf("failed to drop transient age target into RAM sandbox: %v", err)}
@@ -634,62 +626,50 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 		case 6:
 			targetSysConfigDir := "/mnt/etc/nixos"
 			_ = exec.Command("mkdir", "-p", targetSysConfigDir).Run()
-
 			out, err := exec.Command("nixos-generate-config", "--root", "/mnt", "--show-hardware-config").CombinedOutput()
 			if err != nil {
 				return errMsg{err: fmt.Errorf("hardware topology inspection failed: %v\nOutput: %s", err, string(out))}
 			}
-
 			configStr := string(out)
 			lastBrace := strings.LastIndex(configStr, "}")
-
 			cpuProfile := detectCPU()
 			gpuProfile := detectGPU()
 			nvidiaOpen := isNvidiaOpenCapable()
-
 			if lastBrace != -1 {
 				injection := fmt.Sprintf("\n  _module.args.spec = {\n    username = \"%s\";\n    cpu = \"%s\";\n    gpu = \"%s\";\n    nvidiaOpen = %t;\n  };\n",
 					m.username, cpuProfile, gpuProfile, nvidiaOpen)
-
 				configStr = configStr[:lastBrace] + injection + configStr[lastBrace:]
 			}
-
 			hardwareFile := filepath.Join(targetSysConfigDir, "hardware-configuration.nix")
 			if err := os.WriteFile(hardwareFile, []byte(configStr), 0644); err != nil {
 				return errMsg{err: fmt.Errorf("failed writing hardware-configuration.nix: %v", err)}
 			}
-
 			return stepCompleteMsg(stepIdx)
 
 		case 7:
 			userHomeDir := fmt.Sprintf("/mnt/home/%s", m.username)
 			nixCoreDir := filepath.Join(userHomeDir, "nix-core")
 			nixHomeDir := filepath.Join(userHomeDir, "nix-home")
-
 			_ = exec.Command("mkdir", "-p", userHomeDir).Run()
-
 			if out, err := exec.Command("git", "clone", "https://github.com/withoutboat/nix-core.git", nixCoreDir).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to clone nix-core: %v\nOutput: %s", err, string(out))}
 			}
-
 			if out, err := exec.Command("git", "clone", "https://github.com/withoutboat/nix-home.git", nixHomeDir).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to clone nix-home: %v\nOutput: %s", err, string(out))}
 			}
-
 			buildDir, err := os.MkdirTemp("/tmp", "nix-build-flake-*")
 			if err != nil {
 				return errMsg{err: fmt.Errorf("failed to create secure temp build dir: %v", err)}
 			}
-
 			if out, err := exec.Command("cp", "-r", nixCoreDir+"/.", buildDir).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to copy nix-core to build dir: %v\nOutput: %s", err, string(out))}
 			}
-
 			targetHardwareFile := filepath.Join(buildDir, "hardware.nix")
 			if out, err := exec.Command("cp", "/mnt/etc/nixos/hardware-configuration.nix", targetHardwareFile).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to copy hardware config into build dir: %v\nOutput: %s", err, string(out))}
 			}
 
+			_ = exec.Command("rm", "-f", filepath.Join(buildDir, ".gitignore")).Run()
 			_ = exec.Command("rm", "-rf", filepath.Join(buildDir, ".git")).Run()
 
 			if out, err := exec.Command("git", "-c", "safe.directory=*", "-C", buildDir, "init").CombinedOutput(); err != nil {
@@ -697,65 +677,42 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			}
 			_ = exec.Command("git", "-c", "safe.directory=*", "-C", buildDir, "config", "user.name", "bootstrapper").Run()
 			_ = exec.Command("git", "-c", "safe.directory=*", "-C", buildDir, "config", "user.email", "boot@strapper.org").Run()
-
 			if out, err := exec.Command("git", "-c", "safe.directory=*", "-C", buildDir, "add", ".").CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to git add files: %v\nOutput: %s", err, string(out))}
 			}
 			if out, err := exec.Command("git", "-c", "safe.directory=*", "-C", buildDir, "commit", "-m", "stable-deterministic-deploy").CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to git commit: %v\nOutput: %s", err, string(out))}
 			}
-
 			_ = exec.Command("sync").Run()
-
 			targetFlake := fmt.Sprintf("git+file://%s#%s", buildDir, m.hosts[m.selectedHost])
-
-			cmd := exec.Command("nixos-install",
-				"--flake", targetFlake,
-				"--no-root-passwd",
-				"--option", "eval-cache", "false",
-				"--option", "tarball-ttl", "0",
-			)
-
-			cmd.Env = append(os.Environ(),
-				"SOPS_AGE_KEY_FILE=/tmp/age.key",
-				"GIT_CONFIG_COUNT=1",
-				"GIT_CONFIG_KEY_0=safe.directory",
-				"GIT_CONFIG_VALUE_0=*",
-			)
-
+			cmd := exec.Command("nixos-install", "--flake", targetFlake, "--no-root-passwd", "--option", "eval-cache", "false", "--option", "tarball-ttl", "0")
+			cmd.Env = append(os.Environ(), "SOPS_AGE_KEY_FILE=/tmp/age.key", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=*")
 			stdout, err := cmd.StdoutPipe()
 			if err != nil {
 				return errMsg{err: fmt.Errorf("failed to init log stream pipe: %v", err)}
 			}
 			cmd.Stderr = cmd.Stdout
-
 			if err := cmd.Start(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to start deployment command: %v", err)}
 			}
-
 			msgChan := make(chan tea.Msg)
 			go func(ch chan tea.Msg, homeDir string, bDir string) {
 				scanner := bufio.NewScanner(stdout)
 				for scanner.Scan() {
 					ch <- logMsg(scanner.Text())
 				}
-
 				if err := cmd.Wait(); err != nil {
 					ch <- errMsg{err: fmt.Errorf("nixos-install deployment broke: %v", err)}
 					return
 				}
-
 				_ = exec.Command("chown", "-R", "1000:100", homeDir).Run()
 				_ = exec.Command("rm", "-rf", bDir).Run()
-
 				go func() {
 					time.Sleep(3 * time.Second)
 					_ = exec.Command("reboot").Run()
 				}()
-
 				ch <- stepCompleteMsg(7)
 			}(msgChan, userHomeDir, buildDir)
-
 			return installStartedMsg{ch: msgChan}
 		}
 		return successMsg{}
@@ -767,7 +724,6 @@ func getAvailableDisks() []string {
 	if err != nil {
 		return []string{}
 	}
-
 	var disks []string
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	for _, line := range lines {
@@ -783,7 +739,6 @@ func getWiFiNetworks() []string {
 	if err != nil {
 		return []string{}
 	}
-
 	ssidMap := make(map[string]bool)
 	var ssids []string
 	lines := strings.Split(string(out), "\n")
@@ -798,25 +753,15 @@ func getWiFiNetworks() []string {
 	return ssids
 }
 
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[len(s)-maxLen:]
-}
-
 func main() {
 	p := tea.NewProgram(initialModel())
-
 	resModel, err := p.Run()
 	if err != nil {
 		fmt.Printf("Fatal runtime error: %v\n", err)
 		os.Exit(1)
 	}
-
 	if m, ok := resModel.(model); ok && m.shouldRestart {
 		fmt.Println("\n[INFO] Handing over terminal process stack to the new binary release...")
-
 		err = syscall.Exec(m.newBinaryPath, os.Args, os.Environ())
 		if err != nil {
 			fmt.Printf("[ERROR] Process hot-swap deployment crashed: %v\n", err)
@@ -842,13 +787,8 @@ func detectGPU() string {
 	if err != nil {
 		return "none"
 	}
-
 	lines := strings.Split(strings.ToLower(string(out)), "\n")
-	hasVGA := false
-	hasNvidia := false
-	hasAMD := false
-	hasIntel := false
-
+	hasVGA, hasNvidia, hasAMD, hasIntel := false, false, false, false
 	for _, line := range lines {
 		if strings.Contains(line, "vga compatible") || strings.Contains(line, "3d controller") {
 			hasVGA = true
@@ -863,7 +803,6 @@ func detectGPU() string {
 			}
 		}
 	}
-
 	if !hasVGA {
 		return "none"
 	}
@@ -888,8 +827,5 @@ func detectGPU() string {
 func isNvidiaOpenCapable() bool {
 	out, _ := exec.Command("lspci", "-nnk").CombinedOutput()
 	content := strings.ToLower(string(out))
-	return strings.Contains(content, "rtx 20") ||
-		strings.Contains(content, "rtx 30") ||
-		strings.Contains(content, "rtx 40") ||
-		strings.Contains(content, "rtx 50")
+	return strings.Contains(content, "rtx 20") || strings.Contains(content, "rtx 30") || strings.Contains(content, "rtx 40") || strings.Contains(content, "rtx 50")
 }

@@ -233,7 +233,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = stateInputPassphrase
 				m.textInput.Reset()
 				m.textInput.Placeholder = "Enter your secure master passphrase..."
-				m.textInput.EchoMode = textinput.EchoPassword
+				m.textInput.EchoMode = textinput.EchoNormal
 				m.textInput.Focus()
 				m.logs = append(m.logs, fmt.Sprintf("👤 Username registered: %s. Awaiting crypto authority validation...", m.username))
 				return m, nil
@@ -290,7 +290,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.textInput.EchoMode = textinput.EchoNormal
 				} else {
 					m.textInput.Placeholder = fmt.Sprintf("Enter Wi-Fi Password for '%s'...", m.wifiSSID)
-					m.textInput.EchoMode = textinput.EchoPassword
+					m.textInput.EchoMode = textinput.EchoNormal
 				}
 				m.textInput.Focus()
 				return m, nil
@@ -308,7 +308,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.wifiSSID = strings.TrimSpace(m.textInput.Value())
 					m.textInput.Reset()
 					m.textInput.Placeholder = fmt.Sprintf("Enter Wi-Fi Password for '%s'...", m.wifiSSID)
-					m.textInput.EchoMode = textinput.EchoPassword
+					m.textInput.EchoMode = textinput.EchoNormal
 					return m, nil
 				} else {
 					m.wifiPass = m.textInput.Value()

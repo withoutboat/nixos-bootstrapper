@@ -5,10 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/progress"
@@ -36,6 +39,8 @@ const (
 	stateSelectWiFi
 	stateInputWiFiPass
 	stateDeploying
+	stateFailed
+	stateUpdating
 )
 
 type installStep struct {
@@ -127,6 +132,24 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
+	if m.state == stateFailed {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "ctrl+c", "q", "Q":
+				return m, tea.Quit
+			case "r", "R":
+				m.state = stateUpdating
+				return m, selfUpdateAndRestartCmd()
+			}
+		}
+		return m, nil
+	}
+
+	if m.state == stateUpdating {
+		return m, nil
+	}
+
 	switch m.state {
 	case stateSelectHost:
 		switch msg := msg.(type) {
@@ -146,6 +169,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.disks = getAvailableDisks()
 				if len(m.disks) == 0 {
 					m.err = fmt.Errorf("no suitable disks found for installation")
+					m.state = stateFailed
 					return m, nil
 				}
 				m.state = stateSelectDisk
@@ -190,6 +214,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.username = strings.TrimSpace(m.textInput.Value())
 				if m.username == "" {
 					m.err = fmt.Errorf("username cannot be empty")
+					m.state = stateFailed
 					return m, nil
 				}
 				m.state = stateInputPassphrase
@@ -214,6 +239,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.masterPhrase = m.textInput.Value()
 				if len(strings.TrimSpace(m.masterPhrase)) < 8 {
 					m.err = fmt.Errorf("passphrase metrics suboptimal: minimum 8 characters required")
+					m.state = stateFailed
 					return m, nil
 				}
 				m.wifis = getWiFiNetworks()
@@ -323,7 +349,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case errMsg:
 			m.err = msg.err
-			m.done = true
+			m.state = stateFailed
 			return m, nil
 
 		case progress.FrameMsg:
@@ -338,6 +364,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() string {
 	var s strings.Builder
+
+	if m.state == stateFailed {
+		s.WriteString("\n" + titleStyle.Render("NixOS Air-Gapped YubiKey Bootstrapper") + "\n\n")
+		s.WriteString(errorStyle.Render("❌ DEPLOYMENT CRASHED!") + "\n\n")
+		s.WriteString(fmt.Sprintf("Reason:\n%v\n\n", errorStyle.Render(m.err.Error())))
+		s.WriteString("─────────────────────────────────────────────────────────────────\n")
+		s.WriteString("Что делаем?\n")
+		s.WriteString(" [ " + focusedStyle.Render("R") + " Restart with last realise\n")
+		s.WriteString(" [ " + errorStyle.Render("Q") + " ] Exit\n")
+		s.WriteString("─────────────────────────────────────────────────────────────────\n\n")
+
+		s.WriteString("📋 Last Logs:\n")
+		for _, log := range m.logs {
+			s.WriteString(" " + log + "\n")
+		}
+		return s.String()
+	}
+
+	// Экран загрузки обновления
+	if m.state == stateUpdating {
+		s.WriteString("\n" + titleStyle.Render("NixOS Air-Gapped YubiKey Bootstrapper") + "\n\n")
+		s.WriteString("⏳ " + focusedStyle.Render("Обновление окружения на лету...") + "\n\n")
+		s.WriteString(" • Запрос к GitHub Releases API (качаем последний релиз)...\n")
+		s.WriteString(" • Извлечение tar.gz архива в оперативную память (/tmp)...\n")
+		s.WriteString(" • Подмена текущего процесса через syscall.Exec...\n\n")
+		s.WriteString(" Пожалуйста, не выключайте ПК, это займет всего пару секунд.")
+		return s.String()
+	}
+
+	// Основная TUI разметка шагов
 	s.WriteString("\n" + titleStyle.Render("NixOS Air-Gapped YubiKey Bootstrapper") + "\n\n")
 
 	if m.state == stateSelectHost {
@@ -409,9 +465,7 @@ func (m model) View() string {
 	}
 	s.WriteString("--------------------------------------------------\n")
 
-	if m.err != nil {
-		s.WriteString("\n" + errorStyle.Render(fmt.Sprintf("Deployment failure:\n%v", m.err)) + "\n")
-	} else if m.done {
+	if m.done {
 		s.WriteString("\n" + successStyle.Render("✨ Finished! Profile targets successfully committed. Rebooting ecosystem...") + "\n")
 	}
 
@@ -421,6 +475,55 @@ func (m model) View() string {
 func checkMsgChannel(ch chan tea.Msg) tea.Cmd {
 	return func() tea.Msg {
 		return <-ch
+	}
+}
+
+func selfUpdateAndRestartCmd() tea.Cmd {
+	return func() tea.Msg {
+		downloadURL := "https://github.com/withoutboat/nixos-bootstrapper/releases/latest/download/nixos-bootstrapper-linux-amd64.tar.gz"
+		tarPath := "/tmp/bootstrapper.tar.gz"
+		extractedBinPath := "/tmp/nixos-bootstrapper"
+
+		// 1. Стягиваем свежий архив артефакта
+		resp, err := http.Get(downloadURL)
+		if err != nil {
+			return errMsg{err: fmt.Errorf("network fault updating from GitHub: %v", err)}
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return errMsg{err: fmt.Errorf("GitHub validation error (status %d)", resp.StatusCode)}
+		}
+
+		out, err := os.Create(tarPath)
+		if err != nil {
+			return errMsg{err: fmt.Errorf("failed creating RAM storage for binary: %v", err)}
+		}
+
+		if _, err = io.Copy(out, resp.Body); err != nil {
+			out.Close()
+			return errMsg{err: fmt.Errorf("failed pipeline extraction to /tmp: %v", err)}
+		}
+		out.Close()
+
+		// 2. Распаковываем tar.gz в директорию /tmp
+		if outLog, err := exec.Command("tar", "-xzf", tarPath, "-C", "/tmp").CombinedOutput(); err != nil {
+			return errMsg{err: fmt.Errorf("failed extraction workflow: %v\nLog: %s", err, string(outLog))}
+		}
+		_ = os.Remove(tarPath)
+
+		// 3. Выдаем права исполняемого файла
+		if err := os.Chmod(extractedBinPath, 0755); err != nil {
+			return errMsg{err: fmt.Errorf("chmod execution denial: %v", err)}
+		}
+
+		// 4. Замена текущего процесса в памяти на новый
+		err = syscall.Exec(extractedBinPath, os.Args, os.Environ())
+		if err != nil {
+			return errMsg{err: fmt.Errorf("hot-swap process replace failed: %v", err)}
+		}
+
+		return nil
 	}
 }
 
@@ -563,7 +666,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 
 			_ = exec.Command("mkdir", "-p", userHomeDir).Run()
 
-			// 1. Клонируем репозитории
 			if out, err := exec.Command("git", "clone", "https://github.com/withoutboat/nix-core.git", nixCoreDir).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to clone nix-core: %v\nOutput: %s", err, string(out))}
 			}

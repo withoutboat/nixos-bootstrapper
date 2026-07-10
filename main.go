@@ -543,7 +543,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			nvidiaOpen := isNvidiaOpenCapable()
 
 			if lastBrace != -1 {
-				injection := fmt.Sprintf("\n  _module.args.installer = {\n    username = \"%s\";\n    cpu = \"%s\";\n    gpu = \"%s\";\n    nvidiaOpen = %t;\n  };\n",
+				injection := fmt.Sprintf("\n  _module.args.spec = {\n    username = \"%s\";\n    cpu = \"%s\";\n    gpu = \"%s\";\n    nvidiaOpen = %t;\n  };\n",
 					m.username, cpuProfile, gpuProfile, nvidiaOpen)
 
 				configStr = configStr[:lastBrace] + injection + configStr[lastBrace:]

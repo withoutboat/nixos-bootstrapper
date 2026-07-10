@@ -676,18 +676,18 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("failed to clone nix-home: %v\nOutput: %s", err, string(out))}
 			}
 
-			targetHardwareFile := filepath.Join(nixCoreDir, "hardware.nix")
-			if out, err := exec.Command("cp", "/mnt/etc/nixos/hardware-configuration.nix", targetHardwareFile).CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to copy hardware config into flake root: %v\nOutput: %s", err, string(out))}
-			}
-
 			buildDir, err := os.MkdirTemp("/tmp", "nix-build-flake-*")
 			if err != nil {
 				return errMsg{err: fmt.Errorf("failed to create secure temp build dir: %v", err)}
 			}
 
 			if out, err := exec.Command("cp", "-r", nixCoreDir+"/.", buildDir).CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to isolate build directory: %v\nOutput: %s", err, string(out))}
+				return errMsg{err: fmt.Errorf("failed to copy nix-core to build dir: %v\nOutput: %s", err, string(out))}
+			}
+
+			targetHardwareFile := filepath.Join(buildDir, "hardware.nix")
+			if out, err := exec.Command("cp", "/mnt/etc/nixos/hardware-configuration.nix", targetHardwareFile).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to copy hardware config into build dir: %v\nOutput: %s", err, string(out))}
 			}
 
 			_ = exec.Command("rm", "-rf", filepath.Join(buildDir, ".git")).Run()
@@ -734,7 +734,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			}
 
 			msgChan := make(chan tea.Msg)
-
 			go func(ch chan tea.Msg, homeDir string, bDir string) {
 				scanner := bufio.NewScanner(stdout)
 				for scanner.Scan() {

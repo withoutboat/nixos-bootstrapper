@@ -576,7 +576,18 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("failed to copy hardware config into flake root: %v\nOutput: %s", err, string(out))}
 			}
 
-			targetFlake := fmt.Sprintf("path:%s#%s", nixCoreDir, m.hosts[m.selectedHost])
+			buildDir := "/tmp/nix-build-flake"
+			_ = exec.Command("rm", "-rf", buildDir).Run()
+			if out, err := exec.Command("cp", "-r", nixCoreDir, buildDir).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to create build isolated directory: %v\nOutput: %s", err, string(out))}
+			}
+			_ = exec.Command("rm", "-rf", filepath.Join(buildDir, ".git")).Run()
+
+			if out, err := exec.Command("cp", "-r", nixCoreDir, buildDir).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to create build isolated directory: %v\nOutput: %s", err, string(out))}
+			}
+
+			targetFlake := fmt.Sprintf("path:%s#%s", buildDir, m.hosts[m.selectedHost])
 
 			cmd := exec.Command("nixos-install", "--flake", targetFlake, "--no-root-passwd")
 			cmd.Env = append(os.Environ(), "SOPS_AGE_KEY_FILE=/tmp/age.key")

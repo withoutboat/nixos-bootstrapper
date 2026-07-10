@@ -683,15 +683,30 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			if err != nil {
 				return errMsg{err: fmt.Errorf("failed to create secure temp build dir: %v", err)}
 			}
+			_ = os.Remove(buildDir)
 
 			if out, err := exec.Command("cp", "-r", nixCoreDir, buildDir).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to isolate build directory: %v\nOutput: %s", err, string(out))}
 			}
 
 			_ = exec.Command("rm", "-rf", filepath.Join(buildDir, ".git")).Run()
+
+			if out, err := exec.Command("git", "-c", "safe.directory=*", "-C", buildDir, "init").CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to git init: %v\nOutput: %s", err, string(out))}
+			}
+			_ = exec.Command("git", "-c", "safe.directory=*", "-C", buildDir, "config", "user.name", "bootstrapper").Run()
+			_ = exec.Command("git", "-c", "safe.directory=*", "-C", buildDir, "config", "user.email", "boot@strapper.org").Run()
+
+			if out, err := exec.Command("git", "-c", "safe.directory=*", "-C", buildDir, "add", ".").CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to git add files: %v\nOutput: %s", err, string(out))}
+			}
+			if out, err := exec.Command("git", "-c", "safe.directory=*", "-C", buildDir, "commit", "-m", "stable-deterministic-deploy").CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to git commit: %v\nOutput: %s", err, string(out))}
+			}
+
 			_ = exec.Command("sync").Run()
 
-			targetFlake := fmt.Sprintf("path:%s#%s", buildDir, m.hosts[m.selectedHost])
+			targetFlake := fmt.Sprintf("git+file://%s#%s", buildDir, m.hosts[m.selectedHost])
 
 			cmd := exec.Command("nixos-install",
 				"--flake", targetFlake,
@@ -699,7 +714,13 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				"--option", "eval-cache", "false",
 				"--option", "tarball-ttl", "0",
 			)
-			cmd.Env = append(os.Environ(), "SOPS_AGE_KEY_FILE=/tmp/age.key")
+
+			cmd.Env = append(os.Environ(),
+				"SOPS_AGE_KEY_FILE=/tmp/age.key",
+				"GIT_CONFIG_COUNT=1",
+				"GIT_CONFIG_KEY_0=safe.directory",
+				"GIT_CONFIG_VALUE_0=*",
+			)
 
 			stdout, err := cmd.StdoutPipe()
 			if err != nil {

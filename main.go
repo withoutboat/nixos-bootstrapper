@@ -563,6 +563,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 
 			_ = exec.Command("mkdir", "-p", userHomeDir).Run()
 
+			// 1. Клонируем репозитории
 			if out, err := exec.Command("git", "clone", "https://github.com/withoutboat/nix-core.git", nixCoreDir).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to clone nix-core: %v\nOutput: %s", err, string(out))}
 			}
@@ -576,20 +577,26 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("failed to copy hardware config into flake root: %v\nOutput: %s", err, string(out))}
 			}
 
-			buildDir := "/tmp/nix-build-flake"
-			_ = exec.Command("rm", "-rf", buildDir).Run()
-			if out, err := exec.Command("cp", "-r", nixCoreDir, buildDir).CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to create build isolated directory: %v\nOutput: %s", err, string(out))}
+			buildDir, err := os.MkdirTemp("/tmp", "nix-build-flake-*")
+			if err != nil {
+				return errMsg{err: fmt.Errorf("failed to create secure temp build dir: %v", err)}
 			}
-			_ = exec.Command("rm", "-rf", filepath.Join(buildDir, ".git")).Run()
 
 			if out, err := exec.Command("cp", "-r", nixCoreDir, buildDir).CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to create build isolated directory: %v\nOutput: %s", err, string(out))}
+				return errMsg{err: fmt.Errorf("failed to isolate build directory: %v\nOutput: %s", err, string(out))}
 			}
+
+			_ = exec.Command("rm", "-rf", filepath.Join(buildDir, ".git")).Run()
+			_ = exec.Command("sync").Run()
 
 			targetFlake := fmt.Sprintf("path:%s#%s", buildDir, m.hosts[m.selectedHost])
 
-			cmd := exec.Command("nixos-install", "--flake", targetFlake, "--no-root-passwd")
+			cmd := exec.Command("nixos-install",
+				"--flake", targetFlake,
+				"--no-root-passwd",
+				"--option", "eval-cache", "false",
+				"--option", "tarball-ttl", "0",
+			)
 			cmd.Env = append(os.Environ(), "SOPS_AGE_KEY_FILE=/tmp/age.key")
 
 			stdout, err := cmd.StdoutPipe()
@@ -604,7 +611,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 
 			msgChan := make(chan tea.Msg)
 
-			go func(ch chan tea.Msg, homeDir string) {
+			go func(ch chan tea.Msg, homeDir string, bDir string) {
 				scanner := bufio.NewScanner(stdout)
 				for scanner.Scan() {
 					ch <- logMsg(scanner.Text())
@@ -616,6 +623,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				}
 
 				_ = exec.Command("chown", "-R", "1000:100", homeDir).Run()
+				_ = exec.Command("rm", "-rf", bDir).Run()
 
 				go func() {
 					time.Sleep(3 * time.Second)
@@ -623,7 +631,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				}()
 
 				ch <- stepCompleteMsg(7)
-			}(msgChan, userHomeDir)
+			}(msgChan, userHomeDir, buildDir)
 
 			return installStartedMsg{ch: msgChan}
 		}

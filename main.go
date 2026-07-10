@@ -53,27 +53,29 @@ type Config struct {
 }
 
 type model struct {
-	state        sessionState
-	hosts        []string
-	selectedHost int
-	disks        []string
-	selectedDisk int
-	targetDisk   string
-	wifis        []string
-	selectedWiFi int
-	wifiSSID     string
-	wifiPass     string
-	steps        []installStep
-	currentStep  int
-	progress     progress.Model
-	textInput    textinput.Model
-	username     string
-	masterPhrase string
-	yubiSerial   string
-	done         bool
-	err          error
-	logs         []string
-	msgChan      chan tea.Msg
+	state         sessionState
+	hosts         []string
+	selectedHost  int
+	disks         []string
+	selectedDisk  int
+	targetDisk    string
+	wifis         []string
+	selectedWiFi  int
+	wifiSSID      string
+	wifiPass      string
+	steps         []installStep
+	currentStep   int
+	progress      progress.Model
+	textInput     textinput.Model
+	username      string
+	masterPhrase  string
+	yubiSerial    string
+	done          bool
+	err           error
+	logs          []string
+	msgChan       chan tea.Msg
+	shouldRestart bool
+	newBinaryPath string
 }
 
 type stepCompleteMsg int
@@ -81,6 +83,7 @@ type logMsg string
 type successMsg struct{}
 type errMsg struct{ err error }
 type installStartedMsg struct{ ch chan tea.Msg }
+type triggerRestartMsg struct{ binaryPath string }
 
 func initialModel() model {
 	ti := textinput.New()
@@ -147,6 +150,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.state == stateUpdating {
+		switch msg := msg.(type) {
+		case triggerRestartMsg:
+			m.shouldRestart = true
+			m.newBinaryPath = msg.binaryPath
+			return m, tea.Quit
+		case errMsg:
+			m.err = msg.err
+			m.state = stateFailed
+			return m, nil
+		}
 		return m, nil
 	}
 
@@ -220,7 +233,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = stateInputPassphrase
 				m.textInput.Reset()
 				m.textInput.Placeholder = "Enter your secure master passphrase..."
-				m.textInput.EchoMode = textinput.EchoNormal
+				m.textInput.EchoMode = textinput.EchoPassword
 				m.textInput.Focus()
 				m.logs = append(m.logs, fmt.Sprintf("👤 Username registered: %s. Awaiting crypto authority validation...", m.username))
 				return m, nil
@@ -277,7 +290,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.textInput.EchoMode = textinput.EchoNormal
 				} else {
 					m.textInput.Placeholder = fmt.Sprintf("Enter Wi-Fi Password for '%s'...", m.wifiSSID)
-					m.textInput.EchoMode = textinput.EchoNormal
+					m.textInput.EchoMode = textinput.EchoPassword
 				}
 				m.textInput.Focus()
 				return m, nil
@@ -295,7 +308,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.wifiSSID = strings.TrimSpace(m.textInput.Value())
 					m.textInput.Reset()
 					m.textInput.Placeholder = fmt.Sprintf("Enter Wi-Fi Password for '%s'...", m.wifiSSID)
-					m.textInput.EchoMode = textinput.EchoNormal
+					m.textInput.EchoMode = textinput.EchoPassword
 					return m, nil
 				} else {
 					m.wifiPass = m.textInput.Value()
@@ -370,39 +383,37 @@ func (m model) View() string {
 		s.WriteString(errorStyle.Render("❌ DEPLOYMENT CRASHED!") + "\n\n")
 		s.WriteString(fmt.Sprintf("Reason:\n%v\n\n", errorStyle.Render(m.err.Error())))
 		s.WriteString("─────────────────────────────────────────────────────────────────\n")
-		s.WriteString("Что делаем?\n")
-		s.WriteString(" [ " + focusedStyle.Render("R") + " Restart with last realise\n")
-		s.WriteString(" [ " + errorStyle.Render("Q") + " ] Exit\n")
+		s.WriteString("Actions Available:\n")
+		s.WriteString(" [ " + focusedStyle.Render("R") + " ] Hot-reload runner using latest GitHub release\n")
+		s.WriteString(" [ " + errorStyle.Render("Q") + " ] Terminate deployment process\n")
 		s.WriteString("─────────────────────────────────────────────────────────────────\n\n")
 
-		s.WriteString("📋 Last Logs:\n")
+		s.WriteString("📋 Last Runtime Logs:\n")
 		for _, log := range m.logs {
 			s.WriteString(" " + log + "\n")
 		}
 		return s.String()
 	}
 
-	// Экран загрузки обновления
 	if m.state == stateUpdating {
 		s.WriteString("\n" + titleStyle.Render("NixOS Air-Gapped YubiKey Bootstrapper") + "\n\n")
-		s.WriteString("⏳ " + focusedStyle.Render("Обновление окружения на лету...") + "\n\n")
-		s.WriteString(" • Запрос к GitHub Releases API (качаем последний релиз)...\n")
-		s.WriteString(" • Извлечение tar.gz архива в оперативную память (/tmp)...\n")
-		s.WriteString(" • Подмена текущего процесса через syscall.Exec...\n\n")
-		s.WriteString(" Пожалуйста, не выключайте ПК, это займет всего пару секунд.")
+		s.WriteString("⏳ " + focusedStyle.Render("Hot-reloading runtime environment on the fly...") + "\n\n")
+		s.WriteString(" • Querying GitHub Releases API (fetching latest production asset)...\n")
+		s.WriteString(" • Extracting tar.gz bundle into volatile memory sandbox (/tmp)...\n")
+		s.WriteString(" • Swapping current runtime lifecycle via atomic syscall.Exec...\n\n")
+		s.WriteString(" Please maintain ecosystem power. This transition will conclude in moments.")
 		return s.String()
 	}
 
-	// Основная TUI разметка шагов
 	s.WriteString("\n" + titleStyle.Render("NixOS Air-Gapped YubiKey Bootstrapper") + "\n\n")
 
 	if m.state == stateSelectHost {
 		s.WriteString(" Select Target Host Architecture Profile:\n")
 		for i, host := range m.hosts {
 			if m.selectedHost == i {
-				s.WriteString(focusedStyle.Render(fmt.Sprintf("  ➔  %s\n", host)))
+				s.WriteString(focusedStyle.Render(fmt.Sprintf("   ➔  %s\n", host)))
 			} else {
-				s.WriteString(fmt.Sprintf("     %s\n", host))
+				s.WriteString(fmt.Sprintf("      %s\n", host))
 			}
 		}
 		s.WriteString("\n [ Navigation: Up/Down or J/K • Selection: Enter ]\n\n")
@@ -413,9 +424,9 @@ func (m model) View() string {
 		s.WriteString(" Select Target Installation Disk:\n")
 		for i, disk := range m.disks {
 			if m.selectedDisk == i {
-				s.WriteString(focusedStyle.Render(fmt.Sprintf("  ➔  %s\n", disk)))
+				s.WriteString(focusedStyle.Render(fmt.Sprintf("   ➔  %s\n", disk)))
 			} else {
-				s.WriteString(fmt.Sprintf("     %s\n", disk))
+				s.WriteString(fmt.Sprintf("      %s\n", disk))
 			}
 		}
 		s.WriteString("\n [ Navigation: Up/Down or J/K • Selection: Enter ]\n\n")
@@ -433,9 +444,9 @@ func (m model) View() string {
 		s.WriteString("📶 Select Wi-Fi Network:\n")
 		for i, wifi := range m.wifis {
 			if m.selectedWiFi == i {
-				s.WriteString(focusedStyle.Render(fmt.Sprintf("  ➔  %s\n", wifi)))
+				s.WriteString(focusedStyle.Render(fmt.Sprintf("   ➔  %s\n", wifi)))
 			} else {
-				s.WriteString(fmt.Sprintf("     %s\n", wifi))
+				s.WriteString(fmt.Sprintf("      %s\n", wifi))
 			}
 		}
 		s.WriteString("\n [ Navigation: Up/Down or J/K • Selection: Enter ]\n\n")
@@ -484,7 +495,6 @@ func selfUpdateAndRestartCmd() tea.Cmd {
 		tarPath := "/tmp/bootstrapper.tar.gz"
 		extractedBinPath := "/tmp/nixos-bootstrapper"
 
-		// 1. Стягиваем свежий архив артефакта
 		resp, err := http.Get(downloadURL)
 		if err != nil {
 			return errMsg{err: fmt.Errorf("network fault updating from GitHub: %v", err)}
@@ -506,24 +516,16 @@ func selfUpdateAndRestartCmd() tea.Cmd {
 		}
 		out.Close()
 
-		// 2. Распаковываем tar.gz в директорию /tmp
 		if outLog, err := exec.Command("tar", "-xzf", tarPath, "-C", "/tmp").CombinedOutput(); err != nil {
 			return errMsg{err: fmt.Errorf("failed extraction workflow: %v\nLog: %s", err, string(outLog))}
 		}
 		_ = os.Remove(tarPath)
 
-		// 3. Выдаем права исполняемого файла
 		if err := os.Chmod(extractedBinPath, 0755); err != nil {
 			return errMsg{err: fmt.Errorf("chmod execution denial: %v", err)}
 		}
 
-		// 4. Замена текущего процесса в памяти на новый
-		err = syscall.Exec(extractedBinPath, os.Args, os.Environ())
-		if err != nil {
-			return errMsg{err: fmt.Errorf("hot-swap process replace failed: %v", err)}
-		}
-
-		return nil
+		return triggerRestartMsg{binaryPath: extractedBinPath}
 	}
 }
 
@@ -683,9 +685,8 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			if err != nil {
 				return errMsg{err: fmt.Errorf("failed to create secure temp build dir: %v", err)}
 			}
-			_ = os.Remove(buildDir)
 
-			if out, err := exec.Command("cp", "-r", nixCoreDir, buildDir).CombinedOutput(); err != nil {
+			if out, err := exec.Command("cp", "-r", nixCoreDir+"/.", buildDir).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to isolate build directory: %v\nOutput: %s", err, string(out))}
 			}
 
@@ -807,9 +808,21 @@ func truncateString(s string, maxLen int) string {
 
 func main() {
 	p := tea.NewProgram(initialModel())
-	if _, err := p.Run(); err != nil {
+
+	resModel, err := p.Run()
+	if err != nil {
 		fmt.Printf("Fatal runtime error: %v\n", err)
 		os.Exit(1)
+	}
+
+	if m, ok := resModel.(model); ok && m.shouldRestart {
+		fmt.Println("\n[INFO] Handing over terminal process stack to the new binary release...")
+
+		err = syscall.Exec(m.newBinaryPath, os.Args, os.Environ())
+		if err != nil {
+			fmt.Printf("[ERROR] Process hot-swap deployment crashed: %v\n", err)
+			os.Exit(1)
+		}
 	}
 }
 

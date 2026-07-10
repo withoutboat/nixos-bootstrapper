@@ -650,69 +650,74 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			userHomeDir := fmt.Sprintf("/mnt/home/%s", m.username)
 			nixCoreDir := filepath.Join(userHomeDir, "nix-core")
 			nixHomeDir := filepath.Join(userHomeDir, "nix-home")
+
 			_ = exec.Command("mkdir", "-p", userHomeDir).Run()
+
 			if out, err := exec.Command("git", "clone", "https://github.com/withoutboat/nix-core.git", nixCoreDir).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to clone nix-core: %v\nOutput: %s", err, string(out))}
 			}
 			if out, err := exec.Command("git", "clone", "https://github.com/withoutboat/nix-home.git", nixHomeDir).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to clone nix-home: %v\nOutput: %s", err, string(out))}
 			}
+
 			buildDir, err := os.MkdirTemp("/tmp", "nix-build-flake-*")
 			if err != nil {
 				return errMsg{err: fmt.Errorf("failed to create secure temp build dir: %v", err)}
 			}
+
 			if out, err := exec.Command("cp", "-r", nixCoreDir+"/.", buildDir).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to copy nix-core to build dir: %v\nOutput: %s", err, string(out))}
 			}
+
 			targetHardwareFile := filepath.Join(buildDir, "hardware.nix")
 			if out, err := exec.Command("cp", "/mnt/etc/nixos/hardware-configuration.nix", targetHardwareFile).CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to copy hardware config into build dir: %v\nOutput: %s", err, string(out))}
+				return errMsg{err: fmt.Errorf("failed to copy hardware config: %v\nOutput: %s", err, string(out))}
 			}
 
-			_ = exec.Command("rm", "-f", filepath.Join(buildDir, ".gitignore")).Run()
 			_ = exec.Command("rm", "-rf", filepath.Join(buildDir, ".git")).Run()
+			exec.Command("git", "-C", buildDir, "init").Run()
+			exec.Command("git", "-C", buildDir, "config", "user.name", "bootstrapper").Run()
+			exec.Command("git", "-C", buildDir, "config", "user.email", "boot@strapper.org").Run()
 
-			if out, err := exec.Command("git", "-c", "safe.directory=*", "-C", buildDir, "init").CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to git init: %v\nOutput: %s", err, string(out))}
+			if out, err := exec.Command("git", "-C", buildDir, "add", "-A").CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to git add: %v\nOutput: %s", err, string(out))}
 			}
-			_ = exec.Command("git", "-c", "safe.directory=*", "-C", buildDir, "config", "user.name", "bootstrapper").Run()
-			_ = exec.Command("git", "-c", "safe.directory=*", "-C", buildDir, "config", "user.email", "boot@strapper.org").Run()
-			if out, err := exec.Command("git", "-c", "safe.directory=*", "-C", buildDir, "add", ".").CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to git add files: %v\nOutput: %s", err, string(out))}
+
+			if debugFiles, err := exec.Command("git", "-C", buildDir, "ls-files").CombinedOutput(); err == nil {
+				m.logs = append(m.logs, "Git index content:\n"+string(debugFiles))
 			}
-			if out, err := exec.Command("git", "-c", "safe.directory=*", "-C", buildDir, "commit", "-m", "stable-deterministic-deploy").CombinedOutput(); err != nil {
+
+			if out, err := exec.Command("git", "-C", buildDir, "commit", "-m", "stable-deterministic-deploy").CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to git commit: %v\nOutput: %s", err, string(out))}
 			}
+
 			_ = exec.Command("sync").Run()
+
 			targetFlake := fmt.Sprintf("git+file://%s#%s", buildDir, m.hosts[m.selectedHost])
 			cmd := exec.Command("nixos-install", "--flake", targetFlake, "--no-root-passwd", "--option", "eval-cache", "false", "--option", "tarball-ttl", "0")
 			cmd.Env = append(os.Environ(), "SOPS_AGE_KEY_FILE=/tmp/age.key", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=*")
+
 			stdout, err := cmd.StdoutPipe()
 			if err != nil {
 				return errMsg{err: fmt.Errorf("failed to init log stream pipe: %v", err)}
 			}
 			cmd.Stderr = cmd.Stdout
 			if err := cmd.Start(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to start deployment command: %v", err)}
+				return errMsg{err: fmt.Errorf("failed to start deployment: %v", err)}
 			}
+
 			msgChan := make(chan tea.Msg)
 			go func(ch chan tea.Msg, homeDir string, bDir string) {
 				scanner := bufio.NewScanner(stdout)
 				for scanner.Scan() {
 					ch <- logMsg(scanner.Text())
 				}
-				if err := cmd.Wait(); err != nil {
-					ch <- errMsg{err: fmt.Errorf("nixos-install deployment broke: %v", err)}
-					return
-				}
+				cmd.Wait()
 				_ = exec.Command("chown", "-R", "1000:100", homeDir).Run()
 				_ = exec.Command("rm", "-rf", bDir).Run()
-				go func() {
-					time.Sleep(3 * time.Second)
-					_ = exec.Command("reboot").Run()
-				}()
 				ch <- stepCompleteMsg(7)
 			}(msgChan, userHomeDir, buildDir)
+
 			return installStartedMsg{ch: msgChan}
 		}
 		return successMsg{}

@@ -867,16 +867,26 @@ func getAvailableDisks() []string {
 }
 
 func getEFIPartitions() []string {
-	out, err := exec.Command("lsblk", "-l", "-n", "-p", "-o", "NAME,FSTYPE,SIZE").CombinedOutput()
+	out, err := exec.Command("lsblk", "-l", "-n", "-p", "-o", "NAME,SIZE,FSTYPE,PKNAME").CombinedOutput()
 	if err != nil {
 		return []string{}
 	}
+
 	var partitions []string
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+
 	for _, line := range lines {
 		parts := strings.Fields(line)
-		if len(parts) >= 2 && strings.ToLower(parts[1]) == "vfat" {
-			partitions = append(partitions, parts[0])
+		if len(parts) >= 3 && strings.ToLower(parts[2]) == "vfat" {
+			name := parts[0]
+			size := parts[1]
+			parent := "unknown"
+			if len(parts) >= 4 {
+				parent = parts[3]
+			}
+
+			entry := fmt.Sprintf("%s (%s) | Disk: %s", name, size, parent)
+			partitions = append(partitions, entry)
 		}
 	}
 	return partitions

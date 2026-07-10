@@ -22,7 +22,7 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-var BuildDate = "version 3"
+var BuildDate = "version 4 (Multi-EFI)"
 
 var (
 	titleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F5D4")).Bold(true).MarginLeft(2)
@@ -37,6 +37,7 @@ type sessionState int
 const (
 	stateSelectHost sessionState = iota
 	stateSelectDisk
+	stateSelectEFI
 	stateInputUsername
 	stateInputPassphrase
 	stateSelectWiFi
@@ -62,6 +63,9 @@ type model struct {
 	disks         []string
 	selectedDisk  int
 	targetDisk    string
+	efiPartitions []string
+	selectedEFI   int
+	targetEFIDisk string
 	wifis         []string
 	selectedWiFi  int
 	wifiSSID      string
@@ -210,12 +214,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "enter":
 				m.targetDisk = strings.Split(m.disks[m.selectedDisk], " ")[0]
+
+				m.efiPartitions = getEFIPartitions()
+				m.efiPartitions = append(m.efiPartitions, "Create New EFI Partition")
+				m.selectedEFI = 0
+				m.state = stateSelectEFI
+
+				m.logs = append(m.logs, fmt.Sprintf("💾 Target disk set: %s. Awaiting EFI selection...", m.targetDisk))
+				return m, nil
+			}
+		}
+
+	case stateSelectEFI:
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "up", "k":
+				if m.selectedEFI > 0 {
+					m.selectedEFI--
+				}
+			case "down", "j":
+				if m.selectedEFI < len(m.efiPartitions)-1 {
+					m.selectedEFI++
+				}
+			case "enter":
+				selection := m.efiPartitions[m.selectedEFI]
+				if selection == "Create New EFI Partition" {
+					m.targetEFIDisk = ""
+					m.logs = append(m.logs, "💿 EFI Choice: Will create new EFI partition on target disk.")
+				} else {
+					m.targetEFIDisk = selection
+					m.logs = append(m.logs, fmt.Sprintf("💿 EFI Choice: Using existing partition -> %s", m.targetEFIDisk))
+				}
+
 				m.state = stateInputUsername
 				m.textInput.Reset()
 				m.textInput.Placeholder = "Enter target username (e.g. vladimir)..."
 				m.textInput.EchoMode = textinput.EchoNormal
 				m.textInput.Focus()
-				m.logs = append(m.logs, fmt.Sprintf("💾 Target disk set: %s. Awaiting username creation...", m.targetDisk))
 				return m, nil
 			}
 		}
@@ -382,7 +420,7 @@ func (m model) View() string {
 	var s strings.Builder
 
 	if m.state == stateFailed {
-		s.WriteString("\n" + titleStyle.Render(fmt.Sprintf("NixOS Bootstrapper (Build: %s)", BuildDate)) + "\n\n")
+		s.WriteString("\n" + titleStyle.Render(fmt.Sprintf("NixOS Bootstrapper (%s)", BuildDate)) + "\n\n")
 		s.WriteString(errorStyle.Render("❌ DEPLOYMENT CRASHED!") + "\n\n")
 		s.WriteString(fmt.Sprintf("Reason:\n%v\n\n", errorStyle.Render(m.err.Error())))
 		s.WriteString("─────────────────────────────────────────────────────────────────\n")
@@ -399,7 +437,7 @@ func (m model) View() string {
 	}
 
 	if m.state == stateUpdating {
-		s.WriteString("\n" + titleStyle.Render(fmt.Sprintf("NixOS Bootstrapper (Build: %s)", BuildDate)) + "\n\n")
+		s.WriteString("\n" + titleStyle.Render(fmt.Sprintf("NixOS Bootstrapper (%s)", BuildDate)) + "\n\n")
 		s.WriteString("⏳ " + focusedStyle.Render("Hot-reloading runtime environment on the fly...") + "\n\n")
 		s.WriteString(" • Querying GitHub Releases API (fetching latest production asset)...\n")
 		s.WriteString(" • Extracting tar.gz bundle into volatile memory sandbox (/tmp)...\n")
@@ -408,13 +446,13 @@ func (m model) View() string {
 		return s.String()
 	}
 
-	s.WriteString("\n" + titleStyle.Render(fmt.Sprintf("NixOS Bootstrapper (Build: %s)", BuildDate)) + "\n\n")
+	s.WriteString("\n" + titleStyle.Render(fmt.Sprintf("NixOS Bootstrapper (%s)", BuildDate)) + "\n\n")
 
 	if m.state == stateSelectHost {
 		s.WriteString(" Select Target Host Architecture Profile:\n")
 		for i, host := range m.hosts {
 			if m.selectedHost == i {
-				s.WriteString(focusedStyle.Render(fmt.Sprintf("   ➔  %s\n", host)))
+				s.WriteString(focusedStyle.Render(fmt.Sprintf("  ➔  %s\n", host)))
 			} else {
 				s.WriteString(fmt.Sprintf("      %s\n", host))
 			}
@@ -427,9 +465,21 @@ func (m model) View() string {
 		s.WriteString(" Select Target Installation Disk:\n")
 		for i, disk := range m.disks {
 			if m.selectedDisk == i {
-				s.WriteString(focusedStyle.Render(fmt.Sprintf("   ➔  %s\n", disk)))
+				s.WriteString(focusedStyle.Render(fmt.Sprintf("  ➔  %s\n", disk)))
 			} else {
 				s.WriteString(fmt.Sprintf("      %s\n", disk))
+			}
+		}
+		s.WriteString("\n [ Navigation: Up/Down or J/K • Selection: Enter ]\n\n")
+	}
+
+	if m.state == stateSelectEFI {
+		s.WriteString(" Select EFI Boot Partition:\n")
+		for i, efi := range m.efiPartitions {
+			if m.selectedEFI == i {
+				s.WriteString(focusedStyle.Render(fmt.Sprintf("  ➔  %s\n", efi)))
+			} else {
+				s.WriteString(fmt.Sprintf("      %s\n", efi))
 			}
 		}
 		s.WriteString("\n [ Navigation: Up/Down or J/K • Selection: Enter ]\n\n")
@@ -447,7 +497,7 @@ func (m model) View() string {
 		s.WriteString("📶 Select Wi-Fi Network:\n")
 		for i, wifi := range m.wifis {
 			if m.selectedWiFi == i {
-				s.WriteString(focusedStyle.Render(fmt.Sprintf("   ➔  %s\n", wifi)))
+				s.WriteString(focusedStyle.Render(fmt.Sprintf("  ➔  %s\n", wifi)))
 			} else {
 				s.WriteString(fmt.Sprintf("      %s\n", wifi))
 			}
@@ -472,12 +522,14 @@ func (m model) View() string {
 		s.WriteString("\n " + m.progress.View() + "\n\n")
 	}
 
-	s.WriteString("📝 Security Infrastructure Logs:\n")
-	s.WriteString("--------------------------------------------------\n")
-	for _, log := range m.logs {
-		s.WriteString(" " + log + "\n")
+	if len(m.logs) > 0 {
+		s.WriteString("📝 Security Infrastructure Logs:\n")
+		s.WriteString("--------------------------------------------------\n")
+		for _, log := range m.logs {
+			s.WriteString(" " + log + "\n")
+		}
+		s.WriteString("--------------------------------------------------\n")
 	}
-	s.WriteString("--------------------------------------------------\n")
 
 	if m.done {
 		s.WriteString("\n" + successStyle.Render("✨ Finished! Profile targets successfully committed. Rebooting ecosystem...") + "\n")
@@ -547,35 +599,53 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			disk := m.targetDisk
 			exec.Command("umount", "-R", "/mnt").Run()
 			exec.Command("swapoff", "-a").Run()
+
 			if out, err := exec.Command("sgdisk", "-Z", disk).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to wipe disk: %v\nOutput: %s", err, string(out))}
 			}
-			if out, err := exec.Command("sgdisk", "-n", "1:0:+512M", "-t", "1:ef00", "-c", "1:boot", disk).CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to create boot partition: %v\nOutput: %s", err, string(out))}
+
+			var bootPart string
+			var rootPartNum string
+
+			if m.targetEFIDisk != "" {
+				bootPart = m.targetEFIDisk
+				rootPartNum = "1"
+			} else {
+				if out, err := exec.Command("sgdisk", "-n", "1:0:+512M", "-t", "1:ef00", "-c", "1:boot", disk).CombinedOutput(); err != nil {
+					return errMsg{err: fmt.Errorf("failed to create boot partition: %v\nOutput: %s", err, string(out))}
+				}
+				bootPart = disk + "1"
+				if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
+					bootPart = disk + "p1"
+				}
+				if out, err := exec.Command("mkfs.fat", "-F", "32", "-n", "boot", bootPart).CombinedOutput(); err != nil {
+					return errMsg{err: fmt.Errorf("failed to format boot (fat32): %v\nOutput: %s", err, string(out))}
+				}
+				rootPartNum = "2"
 			}
-			if out, err := exec.Command("sgdisk", "-n", "2:0:0", "-t", "2:8300", "-c", "2:root", disk).CombinedOutput(); err != nil {
+
+			if out, err := exec.Command("sgdisk", "-n", rootPartNum+":0:0", "-t", rootPartNum+":8300", "-c", rootPartNum+":root", disk).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to create root partition: %v\nOutput: %s", err, string(out))}
 			}
 			exec.Command("partprobe", disk).Run()
 			time.Sleep(2 * time.Second)
-			part1 := disk + "1"
-			part2 := disk + "2"
+
+			rootPart := disk + rootPartNum
 			if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
-				part1 = disk + "p1"
-				part2 = disk + "p2"
+				rootPart = disk + "p" + rootPartNum
 			}
-			if out, err := exec.Command("mkfs.fat", "-F", "32", "-n", "boot", part1).CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to format boot (fat32): %v\nOutput: %s", err, string(out))}
-			}
-			if out, err := exec.Command("mkfs.ext4", "-F", "-L", "nixos", part2).CombinedOutput(); err != nil {
+
+			if out, err := exec.Command("mkfs.ext4", "-F", "-L", "nixos", rootPart).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to format root (ext4): %v\nOutput: %s", err, string(out))}
 			}
+
 			exec.Command("udevadm", "settle").Run()
+
 			if out, err := exec.Command("mount", "/dev/disk/by-label/nixos", "/mnt").CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to mount root: %v\nOutput: %s", err, string(out))}
 			}
 			exec.Command("mkdir", "-p", "/mnt/boot").Run()
-			if out, err := exec.Command("mount", "/dev/disk/by-label/boot", "/mnt/boot").CombinedOutput(); err != nil {
+			if out, err := exec.Command("mount", bootPart, "/mnt/boot").CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to mount boot: %v\nOutput: %s", err, string(out))}
 			}
 			return stepCompleteMsg(stepIdx)
@@ -636,11 +706,29 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			cpuProfile := detectCPU()
 			gpuProfile := detectGPU()
 			nvidiaOpen := isNvidiaOpenCapable()
-
 			intelID, nvidiaID := getBusIDs()
 
-			if lastBrace != -1 {
+			bootUUIDCmd := exec.Command("sh", "-c", "blkid -s UUID -o value $(findmnt -n -o SOURCE /mnt/boot)")
+			uuidOut, _ := bootUUIDCmd.Output()
+			efiUUID := strings.TrimSpace(string(uuidOut))
+
+			if efiUUID == "" && m.targetEFIDisk != "" {
+				uuidCmd := exec.Command("blkid", "-s", "UUID", "-o", "value", m.targetEFIDisk)
+				uuidOut, _ := uuidCmd.Output()
+				efiUUID = strings.TrimSpace(string(uuidOut))
+			}
+
+			if lastBrace != -1 && efiUUID != "" {
 				injection := fmt.Sprintf(`
+            fileSystems."/boot" = {
+              device = "/dev/disk/by-uuid/%s";
+              fsType = "vfat";
+              options = [ "defaults" "umask=0077" ];
+            };
+            boot.loader.efi.efiSysMountPoint = "/boot";
+            boot.loader.systemd-boot.enable = true;
+            boot.loader.efi.canTouchEfiVariables = true;
+
            _module.args.spec = {
              username = "%s";
              cpu = "%s";
@@ -651,7 +739,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
              intelBusId = "%s";
              nvidiaBusId = "%s";
            };
-          `, m.username, cpuProfile, gpuProfile, nvidiaOpen, intelID, nvidiaID)
+          `, efiUUID, m.username, cpuProfile, gpuProfile, nvidiaOpen, intelID, nvidiaID)
 				configStr = configStr[:lastBrace] + injection + configStr[lastBrace:]
 			}
 			hardwareFile := filepath.Join(targetSysConfigDir, "hardware-configuration.nix")
@@ -699,14 +787,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("failed to git add: %v\nOutput: %s", err, string(out))}
 			}
 
-			files, _ := exec.Command("git", "-C", buildDir, "ls-files").CombinedOutput()
-			m.logs = append(m.logs, "DEBUG: Files added to Git index:")
-			m.logs = append(m.logs, strings.Split(string(files), "\n")...)
-
-			if debugFiles, err := exec.Command("git", "-C", buildDir, "ls-files").CombinedOutput(); err == nil {
-				m.logs = append(m.logs, "Git index content:\n"+string(debugFiles))
-			}
-
 			if _, err := os.Stat(filepath.Join(buildDir, "hardware.nix")); os.IsNotExist(err) {
 				m.logs = append(m.logs, "FATAL: hardware.nix does not exist in buildDir!")
 			} else {
@@ -734,10 +814,11 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 
 			m.logs = append(m.logs, "🔐 Enrolling YubiKey to LUKS slot (FIDO2)...")
 			enrollCmd := "systemd-cryptenroll --fido2-device=auto --fido2-with-user-presence=yes /dev/disk/by-partlabel/disk-main-luks"
-			if out, err := exec.Command("sh", "-c", enrollCmd).CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to enroll YubiKey to LUKS: %v\nOutput: %s", err, string(out))}
+			if _, err := exec.Command("sh", "-c", enrollCmd).CombinedOutput(); err != nil {
+				m.logs = append(m.logs, fmt.Sprintf("⚠️ LUKS YubiKey Error (ignored): %v", err))
+			} else {
+				m.logs = append(m.logs, "✅ YubiKey enrolled to LUKS successfully.")
 			}
-			m.logs = append(m.logs, "✅ YubiKey enrolled to LUKS successfully.")
 
 			msgChan := make(chan tea.Msg)
 			go func(ch chan tea.Msg, homeDir string, bDir string) {
@@ -783,6 +864,22 @@ func getAvailableDisks() []string {
 		}
 	}
 	return disks
+}
+
+func getEFIPartitions() []string {
+	out, err := exec.Command("lsblk", "-l", "-n", "-p", "-o", "NAME,FSTYPE,SIZE").CombinedOutput()
+	if err != nil {
+		return []string{}
+	}
+	var partitions []string
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines {
+		parts := strings.Fields(line)
+		if len(parts) >= 2 && strings.ToLower(parts[1]) == "vfat" {
+			partitions = append(partitions, parts[0])
+		}
+	}
+	return partitions
 }
 
 func getWiFiNetworks() []string {

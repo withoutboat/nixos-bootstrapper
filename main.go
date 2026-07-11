@@ -22,7 +22,7 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-var BuildDate = "version 15 (Multi-EFI / XBOOTLDR)"
+var BuildDate = "version 16 (Multi-EFI / XBOOTLDR)"
 
 var (
 	titleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F5D4")).Bold(true).MarginLeft(2)
@@ -854,12 +854,24 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			}
 
 			m.logs = append(m.logs, "🔐 Enrolling YubiKey to LUKS slot (FIDO2)...")
-			enrollCmd := "systemd-cryptenroll --fido2-device=auto --fido2-with-user-presence=yes /dev/disk/by-partlabel/disk-main-luks"
-			if _, err := exec.Command("sh", "-c", enrollCmd).CombinedOutput(); err != nil {
+
+			passFile := "/tmp/luks-temp-pass"
+			_ = os.WriteFile(passFile, []byte(m.masterPhrase), 0600)
+
+			enrollCmd := exec.Command("systemd-cryptenroll",
+				"--fido2-device=auto",
+				"--fido2-with-user-presence=yes",
+				"--unlock-key-file="+passFile,
+				"/dev/disk/by-partlabel/disk-main-luks",
+			)
+
+			if _, err := enrollCmd.CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("⚠️ LUKS YubiKey Error (ignored): %v", err)}
 			} else {
 				m.logs = append(m.logs, "✅ YubiKey enrolled to LUKS successfully.")
 			}
+
+			_ = os.Remove(passFile)
 
 			msgChan := make(chan tea.Msg)
 			go func(ch chan tea.Msg, homeDir string, bDir string) {

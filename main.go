@@ -22,7 +22,7 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-var BuildDate = "version 5 (Multi-EFI)"
+var BuildDate = "version 6 (Multi-EFI / XBOOTLDR)"
 
 var (
 	titleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F5D4")).Bold(true).MarginLeft(2)
@@ -216,7 +216,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.targetDisk = strings.Split(m.disks[m.selectedDisk], " ")[0]
 
 				m.efiPartitions = getEFIPartitions()
-				m.efiPartitions = append(m.efiPartitions, "Create New EFI Partition")
+				m.efiPartitions = append(m.efiPartitions, "Create New EFI Partition (1GB)")
 				m.selectedEFI = 0
 				m.state = stateSelectEFI
 
@@ -241,11 +241,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "enter":
 				selection := m.efiPartitions[m.selectedEFI]
-				if selection == "Create New EFI Partition" {
+				if strings.Contains(selection, "Create New EFI Partition") {
 					m.targetEFIDisk = ""
 					m.logs = append(m.logs, "💿 EFI Choice: Will create new EFI partition on target disk.")
 				} else {
-					m.targetEFIDisk = selection
+					parts := strings.Split(selection, " ")
+					m.targetEFIDisk = parts[0]
 					m.logs = append(m.logs, fmt.Sprintf("💿 EFI Choice: Using existing partition -> %s", m.targetEFIDisk))
 				}
 
@@ -608,10 +609,24 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			var rootPartNum string
 
 			if m.targetEFIDisk != "" {
-				bootPart = m.targetEFIDisk
-				rootPartNum = "1"
+				exec.Command("mkdir", "-p", "/mnt/efi").Run()
+				if out, err := exec.Command("mount", m.targetEFIDisk, "/mnt/efi").CombinedOutput(); err != nil {
+					return errMsg{err: fmt.Errorf("failed to mount existing efi: %v\nOutput: %s", err, string(out))}
+				}
+
+				if out, err := exec.Command("sgdisk", "-n", "1:0:+1G", "-t", "1:ea00", "-c", "1:boot", disk).CombinedOutput(); err != nil {
+					return errMsg{err: fmt.Errorf("failed to create xbootldr partition: %v\nOutput: %s", err, string(out))}
+				}
+				bootPart = disk + "1"
+				if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
+					bootPart = disk + "p1"
+				}
+				if out, err := exec.Command("mkfs.fat", "-F", "32", "-n", "boot", bootPart).CombinedOutput(); err != nil {
+					return errMsg{err: fmt.Errorf("failed to format xbootldr (fat32): %v\nOutput: %s", err, string(out))}
+				}
+				rootPartNum = "2"
 			} else {
-				if out, err := exec.Command("sgdisk", "-n", "1:0:+512M", "-t", "1:ef00", "-c", "1:boot", disk).CombinedOutput(); err != nil {
+				if out, err := exec.Command("sgdisk", "-n", "1:0:+1G", "-t", "1:ef00", "-c", "1:boot", disk).CombinedOutput(); err != nil {
 					return errMsg{err: fmt.Errorf("failed to create boot partition: %v\nOutput: %s", err, string(out))}
 				}
 				bootPart = disk + "1"
@@ -709,17 +724,48 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			intelID, nvidiaID := getBusIDs()
 
 			bootUUIDCmd := exec.Command("sh", "-c", "blkid -s UUID -o value $(findmnt -n -o SOURCE /mnt/boot)")
-			uuidOut, _ := bootUUIDCmd.Output()
-			efiUUID := strings.TrimSpace(string(uuidOut))
+			bootUUIDOut, _ := bootUUIDCmd.Output()
+			bootUUID := strings.TrimSpace(string(bootUUIDOut))
 
-			if efiUUID == "" && m.targetEFIDisk != "" {
+			var efiUUID string
+			if m.targetEFIDisk != "" {
 				uuidCmd := exec.Command("blkid", "-s", "UUID", "-o", "value", m.targetEFIDisk)
 				uuidOut, _ := uuidCmd.Output()
 				efiUUID = strings.TrimSpace(string(uuidOut))
 			}
 
-			if lastBrace != -1 && efiUUID != "" {
-				injection := fmt.Sprintf(`
+			if lastBrace != -1 && bootUUID != "" {
+				var injection string
+				if m.targetEFIDisk != "" && efiUUID != "" {
+					injection = fmt.Sprintf(`
+            fileSystems."/boot" = {
+              device = "/dev/disk/by-uuid/%s";
+              fsType = "vfat";
+              options = [ "defaults" "umask=0077" ];
+            };
+            fileSystems."/efi" = {
+              device = "/dev/disk/by-uuid/%s";
+              fsType = "vfat";
+              options = [ "defaults" "umask=0077" ];
+            };
+            boot.loader.efi.efiSysMountPoint = "/efi";
+            boot.loader.systemd-boot.enable = true;
+            boot.loader.systemd-boot.configurationLimit = 15;
+            boot.loader.efi.canTouchEfiVariables = true;
+
+            _module.args.spec = {
+              username = "%s";
+              cpu = "%s";
+              gpu = "%s";
+              nvidiaOpen = %t;
+            };
+            hardware.nvidia.prime = {
+              intelBusId = "%s";
+              nvidiaBusId = "%s";
+            };
+          `, bootUUID, efiUUID, m.username, cpuProfile, gpuProfile, nvidiaOpen, intelID, nvidiaID)
+				} else {
+					injection = fmt.Sprintf(`
             fileSystems."/boot" = {
               device = "/dev/disk/by-uuid/%s";
               fsType = "vfat";
@@ -727,19 +773,21 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
             };
             boot.loader.efi.efiSysMountPoint = "/boot";
             boot.loader.systemd-boot.enable = true;
+            boot.loader.systemd-boot.configurationLimit = 15;
             boot.loader.efi.canTouchEfiVariables = true;
 
-           _module.args.spec = {
-             username = "%s";
-             cpu = "%s";
-             gpu = "%s";
-             nvidiaOpen = %t;
-           };
-           hardware.nvidia.prime = {
-             intelBusId = "%s";
-             nvidiaBusId = "%s";
-           };
-          `, efiUUID, m.username, cpuProfile, gpuProfile, nvidiaOpen, intelID, nvidiaID)
+            _module.args.spec = {
+              username = "%s";
+              cpu = "%s";
+              gpu = "%s";
+              nvidiaOpen = %t;
+            };
+            hardware.nvidia.prime = {
+              intelBusId = "%s";
+              nvidiaBusId = "%s";
+            };
+          `, bootUUID, m.username, cpuProfile, gpuProfile, nvidiaOpen, intelID, nvidiaID)
+				}
 				configStr = configStr[:lastBrace] + injection + configStr[lastBrace:]
 			}
 			hardwareFile := filepath.Join(targetSysConfigDir, "hardware-configuration.nix")
@@ -867,7 +915,7 @@ func getAvailableDisks() []string {
 }
 
 func getEFIPartitions() []string {
-	out, err := exec.Command("lsblk", "-l", "-n", "-p", "-o", "NAME,SIZE,FSTYPE,PKNAME").CombinedOutput()
+	out, err := exec.Command("lsblk", "-l", "-n", "-p", "-o", "NAME,SIZE,FSTYPE,PKNAME,DISK-SIZE").CombinedOutput()
 	if err != nil {
 		return []string{}
 	}
@@ -885,7 +933,12 @@ func getEFIPartitions() []string {
 				parent = parts[3]
 			}
 
-			entry := fmt.Sprintf("%s (%s) | Disk: %s", name, size, parent)
+			diskSize := "unknown"
+			if len(parts) >= 5 {
+				diskSize = parts[4]
+			}
+
+			entry := fmt.Sprintf("%s (%s) | Disk: %s [%s]", name, size, parent, diskSize)
 			partitions = append(partitions, entry)
 		}
 	}
@@ -997,7 +1050,7 @@ func getBusIDs() (string, string) {
 		l := strings.ToLower(line)
 		if strings.Contains(l, "vga") || strings.Contains(l, "3d") {
 			parts := strings.Split(line, " ")
-			bus := parts[0] // "01:00.0"
+			bus := parts[0]
 
 			segments := strings.Split(bus, ":")
 			if len(segments) < 2 {

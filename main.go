@@ -601,22 +601,18 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			exec.Command("umount", "-R", "/mnt").Run()
 			exec.Command("swapoff", "-a").Run()
 
+			if out, err := exec.Command("sgdisk", "-Z", disk).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to wipe target disk: %v\nOutput: %s", err, string(out))}
+			}
+
 			rootPartNum := "2"
 			bootPartNum := "1"
 
 			if m.targetEFIDisk != "" {
-				exec.Command("mkdir", "-p", "/mnt/efi").Run()
-				if out, err := exec.Command("mount", m.targetEFIDisk, "/mnt/efi").CombinedOutput(); err != nil {
-					return errMsg{err: fmt.Errorf("failed to mount existing windows efi: %v\nOutput: %s", err, string(out))}
-				}
-
 				if out, err := exec.Command("sgdisk", "-n", bootPartNum+":0:+1G", "-t", bootPartNum+":ea00", "-c", bootPartNum+":boot", disk).CombinedOutput(); err != nil {
 					return errMsg{err: fmt.Errorf("failed to create xbootldr partition: %v\nOutput: %s", err, string(out))}
 				}
 			} else {
-				if out, err := exec.Command("sgdisk", "-Z", disk).CombinedOutput(); err != nil {
-					return errMsg{err: fmt.Errorf("failed to wipe disk: %v\nOutput: %s", err, string(out))}
-				}
 				if out, err := exec.Command("sgdisk", "-n", bootPartNum+":0:+1G", "-t", bootPartNum+":ef00", "-c", bootPartNum+":boot", disk).CombinedOutput(); err != nil {
 					return errMsg{err: fmt.Errorf("failed to create boot partition: %v\nOutput: %s", err, string(out))}
 				}
@@ -660,13 +656,15 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 
 			if m.targetEFIDisk != "" {
 				exec.Command("mkdir", "-p", "/mnt/efi").Run()
-				exec.Command("umount", m.targetEFIDisk).Run() // unmount temporary host mount
+				exec.Command("umount", m.targetEFIDisk).Run()
+
 				if out, err := exec.Command("mount", m.targetEFIDisk, "/mnt/efi").CombinedOutput(); err != nil {
-					return errMsg{err: fmt.Errorf("failed to bind existing efi inside chroot: %v\nOutput: %s", err, string(out))}
+					return errMsg{err: fmt.Errorf("failed to mount existing efi to /mnt/efi: %v\nOutput: %s", err, string(out))}
 				}
 			}
 
 			return stepCompleteMsg(stepIdx)
+
 		case 2:
 			exec.Command("nmcli", "radio", "wifi", "on").Run()
 			if m.wifiSSID != "Manual Entry" && m.wifiSSID != "" {
@@ -919,7 +917,7 @@ func getAvailableDisks() []string {
 func getEFIPartitions() []string {
 	var partitions []string
 
-	out, err := exec.Command("lsblk", "-l", "-n", "-p", "-o", "NAME,SIZE,PKNAME,DISK-SIZE,TYPE").CombinedOutput()
+	out, err := exec.Command("lsblk", "-l", "-n", "-p", "-o", "NAME,SIZE,PKNAME,DISK-SIZE").CombinedOutput()
 	if err != nil {
 		return []string{}
 	}
@@ -927,50 +925,33 @@ func getEFIPartitions() []string {
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	for _, line := range lines {
 		parts := strings.Fields(line)
-		if len(parts) >= 4 && (parts[4] == "part" || strings.Contains(line, "part")) {
-			name := parts[0]
-			size := parts[1]
-			parent := parts[2]
-			diskSize := parts[3]
-
-			blkidOut, blkErr := exec.Command("blkid", "-s", "TYPE", "-o", "value", name).Output()
-			if blkErr == nil && strings.TrimSpace(string(blkidOut)) == "vfat" {
-				entry := fmt.Sprintf("%s (%s) | Disk: %s [%s]", name, size, parent, diskSize)
-				partitions = append(partitions, entry)
-			}
+		if len(parts) == 0 {
+			continue
 		}
-	}
 
-	if len(partitions) == 0 {
-		blkOut, err := exec.Command("sh", "-c", "blkid -t TYPE=vfat -o device").CombinedOutput()
-		if err == nil {
-			devices := strings.Split(strings.TrimSpace(string(blkOut)), "\n")
-			for _, dev := range devices {
-				if dev == "" {
-					continue
-				}
-				lsblkOut, err := exec.Command("lsblk", "-n", "-p", "-o", "NAME,SIZE,PKNAME,DISK-SIZE", dev).CombinedOutput()
-				if err != nil {
-					continue
-				}
-				parts := strings.Fields(strings.TrimSpace(string(lsblkOut)))
-				if len(parts) >= 2 {
-					name := parts[0]
-					size := parts[1]
-					parent := "unknown"
-					if len(parts) >= 3 {
-						parent = parts[2]
-					}
-					diskSize := "unknown"
-					if len(parts) >= 4 {
-						diskSize = parts[3]
-					}
+		name := parts[0]
 
-					entry := fmt.Sprintf("%s (%s) | Disk: %s [%s]", name, size, parent, diskSize)
-					partitions = append(partitions, entry)
-				}
-			}
+		size := "unknown"
+		if len(parts) >= 2 {
+			size = parts[1]
 		}
+
+		parent := "none"
+		if len(parts) >= 3 {
+			parent = parts[2]
+		}
+
+		diskSize := "unknown"
+		if len(parts) >= 4 {
+			diskSize = parts[3]
+		}
+
+		if parent == "" || parent == "-" || parent == name {
+			parent = "self"
+		}
+
+		entry := fmt.Sprintf("%s (%s) | Disk: %s [%s]", name, size, parent, diskSize)
+		partitions = append(partitions, entry)
 	}
 
 	return partitions

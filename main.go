@@ -246,7 +246,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.logs = append(m.logs, "💿 EFI Choice: Will create new EFI partition on target disk.")
 				} else {
 					parts := strings.Split(selection, " ")
-					m.targetEFIDisk = parts[0]
+					if len(parts) > 0 {
+						rawDisk := parts[0]
+						rawDisk = strings.TrimSuffix(rawDisk, ":")
+						m.targetEFIDisk = strings.TrimSpace(rawDisk)
+					}
 					m.logs = append(m.logs, fmt.Sprintf("💿 EFI Choice: Using existing partition -> %s", m.targetEFIDisk))
 				}
 
@@ -604,6 +608,12 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			if out, err := exec.Command("sgdisk", "-Z", disk).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to wipe target disk: %v\nOutput: %s", err, string(out))}
 			}
+
+			fmt.Println("\n==================================================")
+			fmt.Println("[DEBUG DEPLOYMENT CONFIGURATION]")
+			fmt.Printf("  Target Raw Disk:    %q\n", disk)
+			fmt.Printf("  Raw EFI from UI:    %q\n", m.targetEFIDisk)
+			fmt.Println("==================================================")
 
 			rootPartNum := "2"
 			bootPartNum := "1"

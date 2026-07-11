@@ -22,7 +22,7 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-var BuildDate = "version 14 (Multi-EFI / XBOOTLDR)"
+var BuildDate = "version 15 (Multi-EFI / XBOOTLDR)"
 
 var (
 	titleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F5D4")).Bold(true).MarginLeft(2)
@@ -632,26 +632,38 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("failed to format boot/xbootldr (fat32): %v\nOutput: %s", err, string(out))}
 			}
 
-			if out, err := exec.Command("sgdisk", "-n", rootPartNum+":0:0", "-t", rootPartNum+":8300", "-c", rootPartNum+":root", disk).CombinedOutput(); err != nil {
+			if out, err := exec.Command("sgdisk", "-n", rootPartNum+":0:0", "-t", rootPartNum+":8300", "-c", rootPartNum+":disk-main-luks", disk).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to create root partition: %v\nOutput: %s", err, string(out))}
 			}
 
 			exec.Command("partprobe", disk).Run()
-			time.Sleep(2 * time.Second)
+			time.Sleep(2 * time.Second) // Ждем инициализации udev
 
 			rootPart := disk + rootPartNum
 			if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
 				rootPart = disk + "p" + rootPartNum
 			}
 
-			if out, err := exec.Command("mkfs.ext4", "-F", "-L", "nixos", rootPart).CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to format root (ext4): %v\nOutput: %s", err, string(out))}
+			luksFormatCmd := exec.Command("cryptsetup", "luksFormat", "--type", "luks2", "--batch-mode", rootPart, "--key-file", "-")
+			luksFormatCmd.Stdin = strings.NewReader(m.masterPhrase)
+			if out, err := luksFormatCmd.CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to format LUKS container: %v\nOutput: %s", err, string(out))}
+			}
+
+			luksOpenCmd := exec.Command("cryptsetup", "open", "--key-file", "-", rootPart, "cryptroot")
+			luksOpenCmd.Stdin = strings.NewReader(m.masterPhrase)
+			if out, err := luksOpenCmd.CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to open LUKS container: %v\nOutput: %s", err, string(out))}
+			}
+
+			if out, err := exec.Command("mkfs.ext4", "-F", "-L", "nixos", "/dev/mapper/cryptroot").CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to format cryptroot (ext4): %v\nOutput: %s", err, string(out))}
 			}
 
 			exec.Command("udevadm", "settle").Run()
 
-			if out, err := exec.Command("mount", "/dev/disk/by-label/nixos", "/mnt").CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to mount root: %v\nOutput: %s", err, string(out))}
+			if out, err := exec.Command("mount", "/dev/mapper/cryptroot", "/mnt").CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to mount decrypted root: %v\nOutput: %s", err, string(out))}
 			}
 
 			exec.Command("mkdir", "-p", "/mnt/boot").Run()
@@ -844,7 +856,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			m.logs = append(m.logs, "🔐 Enrolling YubiKey to LUKS slot (FIDO2)...")
 			enrollCmd := "systemd-cryptenroll --fido2-device=auto --fido2-with-user-presence=yes /dev/disk/by-partlabel/disk-main-luks"
 			if _, err := exec.Command("sh", "-c", enrollCmd).CombinedOutput(); err != nil {
-				m.logs = append(m.logs, fmt.Sprintf("⚠️ LUKS YubiKey Error (ignored): %v", err))
+				return errMsg{err: fmt.Errorf("⚠️ LUKS YubiKey Error (ignored): %v", err)}
 			} else {
 				m.logs = append(m.logs, "✅ YubiKey enrolled to LUKS successfully.")
 			}

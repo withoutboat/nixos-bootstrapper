@@ -917,59 +917,62 @@ func getAvailableDisks() []string {
 }
 
 func getEFIPartitions() []string {
-	type LsblkOutput struct {
-		Blockdevices []struct {
-			Name     string `json:"name"`
-			Size     string `json:"size"`
-			Fstype   string `json:"fstype"`
-			Pkname   string `json:"pkname"`
-			DiskSize string `json:"disk-size"`
-		} `json:"blockdevices"`
-	}
+	var partitions []string
 
-	out, err := exec.Command("lsblk", "-l", "-b", "-n", "-p", "-o", "NAME,SIZE,FSTYPE,PKNAME,DISK-SIZE", "--json").CombinedOutput()
+	out, err := exec.Command("lsblk", "-l", "-n", "-p", "-o", "NAME,SIZE,PKNAME,DISK-SIZE,TYPE").CombinedOutput()
 	if err != nil {
 		return []string{}
 	}
 
-	var data LsblkOutput
-	if err := json.Unmarshal(out, &data); err != nil {
-		return []string{}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines {
+		parts := strings.Fields(line)
+		if len(parts) >= 4 && (parts[4] == "part" || strings.Contains(line, "part")) {
+			name := parts[0]
+			size := parts[1]
+			parent := parts[2]
+			diskSize := parts[3]
+
+			blkidOut, blkErr := exec.Command("blkid", "-s", "TYPE", "-o", "value", name).Output()
+			if blkErr == nil && strings.TrimSpace(string(blkidOut)) == "vfat" {
+				entry := fmt.Sprintf("%s (%s) | Disk: %s [%s]", name, size, parent, diskSize)
+				partitions = append(partitions, entry)
+			}
+		}
 	}
 
-	var partitions []string
-	for _, dev := range data.Blockdevices {
-		nameLower := strings.ToLower(dev.Name)
-
-		if strings.Contains(nameLower, "loop") || strings.Contains(nameLower, "airootfs") {
-			continue
-		}
-
-		if dev.Pkname == "" {
-			continue
-		}
-
-		sizeBytes, err := strconv.ParseInt(dev.Size, 10, 64)
-		sizeStr := dev.Size
+	if len(partitions) == 0 {
+		blkOut, err := exec.Command("sh", "-c", "blkid -t TYPE=vfat -o device").CombinedOutput()
 		if err == nil {
-			sizeStr = fmt.Sprintf("%.0fM", float64(sizeBytes)/(1024*1024))
-		}
+			devices := strings.Split(strings.TrimSpace(string(blkOut)), "\n")
+			for _, dev := range devices {
+				if dev == "" {
+					continue
+				}
+				lsblkOut, err := exec.Command("lsblk", "-n", "-p", "-o", "NAME,SIZE,PKNAME,DISK-SIZE", dev).CombinedOutput()
+				if err != nil {
+					continue
+				}
+				parts := strings.Fields(strings.TrimSpace(string(lsblkOut)))
+				if len(parts) >= 2 {
+					name := parts[0]
+					size := parts[1]
+					parent := "unknown"
+					if len(parts) >= 3 {
+						parent = parts[2]
+					}
+					diskSize := "unknown"
+					if len(parts) >= 4 {
+						diskSize = parts[3]
+					}
 
-		dSize := dev.DiskSize
-		if dSize == "" {
-			dSize = "unknown"
-		} else if dSizeBytes, err := strconv.ParseInt(dSize, 10, 64); err == nil {
-			dSize = fmt.Sprintf("%.0fG", float64(dSizeBytes)/(1024*1024*1024))
+					entry := fmt.Sprintf("%s (%s) | Disk: %s [%s]", name, size, parent, diskSize)
+					partitions = append(partitions, entry)
+				}
+			}
 		}
-
-		fsType := dev.Fstype
-		if fsType == "" {
-			fsType = "unknown/raw"
-		}
-
-		entry := fmt.Sprintf("%s (%s) | FS: %s | Disk: %s [%s]", dev.Name, sizeStr, fsType, dev.Pkname, dSize)
-		partitions = append(partitions, entry)
 	}
+
 	return partitions
 }
 

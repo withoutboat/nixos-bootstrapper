@@ -22,7 +22,7 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-var BuildDate = "version 12 (Multi-EFI / XBOOTLDR)"
+var BuildDate = "version 13 (Multi-EFI / XBOOTLDR)"
 
 var (
 	titleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F5D4")).Bold(true).MarginLeft(2)
@@ -743,11 +743,11 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				var injection string
 				if m.targetEFIDisk != "" && efiUUID != "" {
 					injection = fmt.Sprintf(`
-            fileSystems."/efi" = {
+            fileSystems."/efi" = lib.mkForce {
               device = "/dev/disk/by-uuid/%s";
               fsType = "vfat";
               options = [ "defaults" "umask=0077" ];
-            };
+            }; 
             boot.loader.efi.efiSysMountPoint = "/efi";
             boot.loader.systemd-boot.enable = true;
             boot.loader.systemd-boot.configurationLimit = 15;

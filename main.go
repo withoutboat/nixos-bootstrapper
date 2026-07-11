@@ -22,7 +22,7 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-var BuildDate = "version 8 (Multi-EFI / XBOOTLDR)"
+var BuildDate = "version 9 (Multi-EFI / XBOOTLDR)"
 
 var (
 	titleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F5D4")).Bold(true).MarginLeft(2)
@@ -924,11 +924,10 @@ func getEFIPartitions() []string {
 			Fstype   string `json:"fstype"`
 			Pkname   string `json:"pkname"`
 			DiskSize string `json:"disk-size"`
-			Parttype string `json:"parttype"`
 		} `json:"blockdevices"`
 	}
 
-	out, err := exec.Command("lsblk", "-l", "-b", "-n", "-p", "-o", "NAME,SIZE,FSTYPE,PKNAME,DISK-SIZE,PARTTYPE", "--json").CombinedOutput()
+	out, err := exec.Command("lsblk", "-l", "-b", "-n", "-p", "-o", "NAME,SIZE,FSTYPE,PKNAME,DISK-SIZE", "--json").CombinedOutput()
 	if err != nil {
 		return []string{}
 	}
@@ -940,42 +939,36 @@ func getEFIPartitions() []string {
 
 	var partitions []string
 	for _, dev := range data.Blockdevices {
-		isEFI := false
+		nameLower := strings.ToLower(dev.Name)
 
-		if strings.ToLower(dev.Parttype) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" {
-			isEFI = true
+		if strings.Contains(nameLower, "loop") || strings.Contains(nameLower, "airootfs") {
+			continue
 		}
 
-		if !isEFI && strings.ToLower(dev.Fstype) == "vfat" {
-			if !strings.Contains(dev.Name, "loop") && !strings.Contains(dev.Name, "airootfs") {
-				isEFI = true
-			}
+		if dev.Pkname == "" {
+			continue
 		}
 
-		if isEFI {
-			parent := dev.Pkname
-			if parent == "" {
-				parent = "unknown"
-			}
-
-			dSize := dev.DiskSize
-			if dSize == "" {
-				dSize = "unknown"
-			}
-
-			sizeBytes, err := strconv.ParseInt(dev.Size, 10, 64)
-			sizeStr := dev.Size
-			if err == nil {
-				sizeStr = fmt.Sprintf("%.0fM", float64(sizeBytes)/(1024*1024))
-			}
-
-			if dSizeBytes, err := strconv.ParseInt(dSize, 10, 64); err == nil {
-				dSize = fmt.Sprintf("%.0fG", float64(dSizeBytes)/(1024*1024*1024))
-			}
-
-			entry := fmt.Sprintf("%s (%s) | Disk: %s [%s]", dev.Name, sizeStr, parent, dSize)
-			partitions = append(partitions, entry)
+		sizeBytes, err := strconv.ParseInt(dev.Size, 10, 64)
+		sizeStr := dev.Size
+		if err == nil {
+			sizeStr = fmt.Sprintf("%.0fM", float64(sizeBytes)/(1024*1024))
 		}
+
+		dSize := dev.DiskSize
+		if dSize == "" {
+			dSize = "unknown"
+		} else if dSizeBytes, err := strconv.ParseInt(dSize, 10, 64); err == nil {
+			dSize = fmt.Sprintf("%.0fG", float64(dSizeBytes)/(1024*1024*1024))
+		}
+
+		fsType := dev.Fstype
+		if fsType == "" {
+			fsType = "unknown/raw"
+		}
+
+		entry := fmt.Sprintf("%s (%s) | FS: %s | Disk: %s [%s]", dev.Name, sizeStr, fsType, dev.Pkname, dSize)
+		partitions = append(partitions, entry)
 	}
 	return partitions
 }

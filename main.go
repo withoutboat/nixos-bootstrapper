@@ -917,43 +917,72 @@ func getAvailableDisks() []string {
 func getEFIPartitions() []string {
 	var partitions []string
 
-	out, err := exec.Command("lsblk", "-l", "-n", "-p", "-o", "NAME,SIZE,PKNAME,DISK-SIZE").CombinedOutput()
+	fmt.Println("[DEBUG] Starting getEFIPartitions()...")
+
+	cmd := exec.Command("lsblk", "-l", "-n", "-p", "-o", "NAME,SIZE,PKNAME,DISK-SIZE")
+	out, err := cmd.CombinedOutput()
+
 	if err != nil {
-		return []string{}
+		fmt.Printf("[DEBUG] ERROR running lsblk: %v\nOutput: %s\n", err, string(out))
+
+		fmt.Println("[DEBUG] Trying absolute path /run/current-system/sw/bin/lsblk...")
+		cmd = exec.Command("/run/current-system/sw/bin/lsblk", "-l", "-n", "-p", "-o", "NAME,SIZE,PKNAME,DISK-SIZE")
+		out, err = cmd.CombinedOutput()
+		if err != nil {
+			fmt.Printf("[DEBUG] ERROR running absolute lsblk: %v\nOutput: %s\n", err, string(out))
+		}
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	for _, line := range lines {
-		parts := strings.Fields(line)
-		if len(parts) == 0 {
-			continue
+	if err == nil && len(out) > 0 {
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		fmt.Printf("[DEBUG] lsblk returned %d lines\n", len(lines))
+
+		for i, line := range lines {
+			parts := strings.Fields(line)
+			fmt.Printf("[DEBUG] Line %d: raw='%s' | parts_len=%d\n", i, line, len(parts))
+
+			if len(parts) == 0 {
+				continue
+			}
+
+			name := parts[0]
+			size := "unknown"
+			if len(parts) >= 2 {
+				size = parts[1]
+			}
+
+			parent := "none"
+			if len(parts) >= 3 {
+				parent = parts[2]
+			}
+
+			diskSize := "unknown"
+			if len(parts) >= 4 {
+				diskSize = parts[3]
+			}
+
+			entry := fmt.Sprintf("%s (%s) | Disk: %s [%s]", name, size, parent, diskSize)
+			partitions = append(partitions, entry)
 		}
-
-		name := parts[0]
-
-		size := "unknown"
-		if len(parts) >= 2 {
-			size = parts[1]
-		}
-
-		parent := "none"
-		if len(parts) >= 3 {
-			parent = parts[2]
-		}
-
-		diskSize := "unknown"
-		if len(parts) >= 4 {
-			diskSize = parts[3]
-		}
-
-		if parent == "" || parent == "-" || parent == name {
-			parent = "self"
-		}
-
-		entry := fmt.Sprintf("%s (%s) | Disk: %s [%s]", name, size, parent, diskSize)
-		partitions = append(partitions, entry)
 	}
 
+	if len(partitions) == 0 {
+		fmt.Println("[DEBUG] Strategy 1 empty. Testing blkid fallback...")
+		blkOut, blkErr := exec.Command("blkid").CombinedOutput()
+		if blkErr != nil {
+			fmt.Printf("[DEBUG] ERROR running blkid: %v\nOutput: %s\n", blkErr, string(blkOut))
+		} else {
+			fmt.Printf("[DEBUG] blkid raw output len: %d\n", len(blkOut))
+			lines := strings.Split(strings.TrimSpace(string(blkOut)), "\n")
+			for _, line := range lines {
+				if strings.TrimSpace(line) != "" {
+					partitions = append(partitions, line)
+				}
+			}
+		}
+	}
+
+	fmt.Printf("[DEBUG] getEFIPartitions() finished. Total collected: %d\n", len(partitions))
 	return partitions
 }
 

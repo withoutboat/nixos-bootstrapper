@@ -609,12 +609,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("failed to wipe target disk: %v\nOutput: %s", err, string(out))}
 			}
 
-			fmt.Println("\n==================================================")
-			fmt.Println("[DEBUG DEPLOYMENT CONFIGURATION]")
-			fmt.Printf("  Target Raw Disk:    %q\n", disk)
-			fmt.Printf("  Raw EFI from UI:    %q\n", m.targetEFIDisk)
-			fmt.Println("==================================================")
-
 			rootPartNum := "2"
 			bootPartNum := "1"
 
@@ -748,11 +742,8 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				var injection string
 				if m.targetEFIDisk != "" && efiUUID != "" {
 					injection = fmt.Sprintf(`
-            fileSystems."/boot" = {
-              device = "/dev/disk/by-uuid/%s";
-              fsType = "vfat";
-              options = [ "defaults" "umask=0077" ];
-            };
+            fileSystems."/boot".options = [ "defaults" "umask=0077" ];
+
             fileSystems."/efi" = {
               device = "/dev/disk/by-uuid/%s";
               fsType = "vfat";
@@ -773,14 +764,11 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
               intelBusId = "%s";
               nvidiaBusId = "%s";
             };
-          `, bootUUID, efiUUID, m.username, cpuProfile, gpuProfile, nvidiaOpen, intelID, nvidiaID)
+          `, efiUUID, m.username, cpuProfile, gpuProfile, nvidiaOpen, intelID, nvidiaID)
 				} else {
 					injection = fmt.Sprintf(`
-            fileSystems."/boot" = {
-              device = "/dev/disk/by-uuid/%s";
-              fsType = "vfat";
-              options = [ "defaults" "umask=0077" ];
-            };
+            fileSystems."/boot".options = [ "defaults" "umask=0077" ];
+
             boot.loader.efi.efiSysMountPoint = "/boot";
             boot.loader.systemd-boot.enable = true;
             boot.loader.systemd-boot.configurationLimit = 15;
@@ -796,10 +784,11 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
               intelBusId = "%s";
               nvidiaBusId = "%s";
             };
-          `, bootUUID, m.username, cpuProfile, gpuProfile, nvidiaOpen, intelID, nvidiaID)
+          `, m.username, cpuProfile, gpuProfile, nvidiaOpen, intelID, nvidiaID)
 				}
 				configStr = configStr[:lastBrace] + injection + configStr[lastBrace:]
 			}
+
 			hardwareFile := filepath.Join(targetSysConfigDir, "hardware-configuration.nix")
 			if err := os.WriteFile(hardwareFile, []byte(configStr), 0644); err != nil {
 				return errMsg{err: fmt.Errorf("failed writing hardware-configuration.nix: %v", err)}

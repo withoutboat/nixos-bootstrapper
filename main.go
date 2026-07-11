@@ -602,6 +602,11 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 
 		case 1:
 			disk := m.targetDisk
+			if _, err := exec.Command("mountpoint", "-q", "/mnt").CombinedOutput(); err == nil {
+				fmt.Println("[DEBUG] /mnt is already mounted, skipping disk partitioning and formatting.")
+				return stepCompleteMsg(stepIdx)
+			}
+
 			exec.Command("umount", "-R", "/mnt").Run()
 			exec.Command("swapoff", "-a").Run()
 

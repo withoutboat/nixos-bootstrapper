@@ -605,6 +605,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 
 			exec.Command("umount", "-R", "/mnt").Run()
 			exec.Command("swapoff", "-a").Run()
+			exec.Command("cryptsetup", "close", "cryptroot").Run()
 
 			if out, err := exec.Command("sgdisk", "-Z", disk).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to wipe target disk: %v\nOutput: %s", err, string(out))}

@@ -22,7 +22,7 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-var BuildDate = "version 7 (Multi-EFI / XBOOTLDR)"
+var BuildDate = "version 8 (Multi-EFI / XBOOTLDR)"
 
 var (
 	titleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F5D4")).Bold(true).MarginLeft(2)
@@ -601,92 +601,72 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			exec.Command("umount", "-R", "/mnt").Run()
 			exec.Command("swapoff", "-a").Run()
 
+			rootPartNum := "2"
+			bootPartNum := "1"
+
 			if m.targetEFIDisk != "" {
 				exec.Command("mkdir", "-p", "/mnt/efi").Run()
 				if out, err := exec.Command("mount", m.targetEFIDisk, "/mnt/efi").CombinedOutput(); err != nil {
-					return errMsg{err: fmt.Errorf("failed to mount existing efi: %v\nOutput: %s", err, string(out))}
+					return errMsg{err: fmt.Errorf("failed to mount existing windows efi: %v\nOutput: %s", err, string(out))}
 				}
 
-				if out, err := exec.Command("sgdisk", "-n", "1:0:+1G", "-t", "1:ea00", "-c", "1:boot", disk).CombinedOutput(); err != nil {
+				if out, err := exec.Command("sgdisk", "-n", bootPartNum+":0:+1G", "-t", bootPartNum+":ea00", "-c", bootPartNum+":boot", disk).CombinedOutput(); err != nil {
 					return errMsg{err: fmt.Errorf("failed to create xbootldr partition: %v\nOutput: %s", err, string(out))}
-				}
-				bootPart := disk + "1"
-				if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
-					bootPart = disk + "p1"
-				}
-				if out, err := exec.Command("mkfs.fat", "-F", "32", "-n", "boot", bootPart).CombinedOutput(); err != nil {
-					return errMsg{err: fmt.Errorf("failed to format xbootldr (fat32): %v\nOutput: %s", err, string(out))}
-				}
-				rootPartNum := "2"
-
-				if out, err := exec.Command("sgdisk", "-n", rootPartNum+":0:0", "-t", rootPartNum+":8300", "-c", rootPartNum+":root", disk).CombinedOutput(); err != nil {
-					return errMsg{err: fmt.Errorf("failed to create root partition: %v\nOutput: %s", err, string(out))}
-				}
-				exec.Command("partprobe", disk).Run()
-				time.Sleep(2 * time.Second)
-
-				rootPart := disk + rootPartNum
-				if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
-					rootPart = disk + "p" + rootPartNum
-				}
-
-				if out, err := exec.Command("mkfs.ext4", "-F", "-L", "nixos", rootPart).CombinedOutput(); err != nil {
-					return errMsg{err: fmt.Errorf("failed to format root (ext4): %v\nOutput: %s", err, string(out))}
-				}
-
-				exec.Command("udevadm", "settle").Run()
-
-				if out, err := exec.Command("mount", "/dev/disk/by-label/nixos", "/mnt").CombinedOutput(); err != nil {
-					return errMsg{err: fmt.Errorf("failed to mount root: %v\nOutput: %s", err, string(out))}
-				}
-				exec.Command("mkdir", "-p", "/mnt/boot").Run()
-				if out, err := exec.Command("mount", bootPart, "/mnt/boot").CombinedOutput(); err != nil {
-					return errMsg{err: fmt.Errorf("failed to mount boot: %v\nOutput: %s", err, string(out))}
 				}
 			} else {
 				if out, err := exec.Command("sgdisk", "-Z", disk).CombinedOutput(); err != nil {
 					return errMsg{err: fmt.Errorf("failed to wipe disk: %v\nOutput: %s", err, string(out))}
 				}
-
-				if out, err := exec.Command("sgdisk", "-n", "1:0:+1G", "-t", "1:ef00", "-c", "1:boot", disk).CombinedOutput(); err != nil {
+				if out, err := exec.Command("sgdisk", "-n", bootPartNum+":0:+1G", "-t", bootPartNum+":ef00", "-c", bootPartNum+":boot", disk).CombinedOutput(); err != nil {
 					return errMsg{err: fmt.Errorf("failed to create boot partition: %v\nOutput: %s", err, string(out))}
 				}
-				bootPart := disk + "1"
-				if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
-					bootPart = disk + "p1"
-				}
-				if out, err := exec.Command("mkfs.fat", "-F", "32", "-n", "boot", bootPart).CombinedOutput(); err != nil {
-					return errMsg{err: fmt.Errorf("failed to format boot (fat32): %v\nOutput: %s", err, string(out))}
-				}
+			}
 
-				rootPartNum := "2"
-				if out, err := exec.Command("sgdisk", "-n", rootPartNum+":0:0", "-t", rootPartNum+":8300", "-c", rootPartNum+":root", disk).CombinedOutput(); err != nil {
-					return errMsg{err: fmt.Errorf("failed to create root partition: %v\nOutput: %s", err, string(out))}
-				}
-				exec.Command("partprobe", disk).Run()
-				time.Sleep(2 * time.Second)
+			bootPart := disk + bootPartNum
+			if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
+				bootPart = disk + "p" + bootPartNum
+			}
 
-				rootPart := disk + rootPartNum
-				if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
-					rootPart = disk + "p" + rootPartNum
-				}
+			if out, err := exec.Command("mkfs.fat", "-F", "32", "-n", "boot", bootPart).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to format boot/xbootldr (fat32): %v\nOutput: %s", err, string(out))}
+			}
 
-				if out, err := exec.Command("mkfs.ext4", "-F", "-L", "nixos", rootPart).CombinedOutput(); err != nil {
-					return errMsg{err: fmt.Errorf("failed to format root (ext4): %v\nOutput: %s", err, string(out))}
-				}
+			if out, err := exec.Command("sgdisk", "-n", rootPartNum+":0:0", "-t", rootPartNum+":8300", "-c", rootPartNum+":root", disk).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to create root partition: %v\nOutput: %s", err, string(out))}
+			}
 
-				exec.Command("udevadm", "settle").Run()
+			exec.Command("partprobe", disk).Run()
+			time.Sleep(2 * time.Second)
 
-				if out, err := exec.Command("mount", "/dev/disk/by-label/nixos", "/mnt").CombinedOutput(); err != nil {
-					return errMsg{err: fmt.Errorf("failed to mount root: %v\nOutput: %s", err, string(out))}
-				}
-				exec.Command("mkdir", "-p", "/mnt/boot").Run()
-				if out, err := exec.Command("mount", bootPart, "/mnt/boot").CombinedOutput(); err != nil {
-					return errMsg{err: fmt.Errorf("failed to mount boot: %v\nOutput: %s", err, string(out))}
+			rootPart := disk + rootPartNum
+			if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
+				rootPart = disk + "p" + rootPartNum
+			}
+
+			if out, err := exec.Command("mkfs.ext4", "-F", "-L", "nixos", rootPart).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to format root (ext4): %v\nOutput: %s", err, string(out))}
+			}
+
+			exec.Command("udevadm", "settle").Run()
+
+			if out, err := exec.Command("mount", "/dev/disk/by-label/nixos", "/mnt").CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to mount root: %v\nOutput: %s", err, string(out))}
+			}
+
+			exec.Command("mkdir", "-p", "/mnt/boot").Run()
+			if out, err := exec.Command("mount", bootPart, "/mnt/boot").CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to mount boot: %v\nOutput: %s", err, string(out))}
+			}
+
+			if m.targetEFIDisk != "" {
+				exec.Command("mkdir", "-p", "/mnt/efi").Run()
+				exec.Command("umount", m.targetEFIDisk).Run() // unmount temporary host mount
+				if out, err := exec.Command("mount", m.targetEFIDisk, "/mnt/efi").CombinedOutput(); err != nil {
+					return errMsg{err: fmt.Errorf("failed to bind existing efi inside chroot: %v\nOutput: %s", err, string(out))}
 				}
 			}
-			return stepCompleteMsg(stepIdx)
 
+			return stepCompleteMsg(stepIdx)
 		case 2:
 			exec.Command("nmcli", "radio", "wifi", "on").Run()
 			if m.wifiSSID != "Manual Entry" && m.wifiSSID != "" {
@@ -937,36 +917,63 @@ func getAvailableDisks() []string {
 }
 
 func getEFIPartitions() []string {
-	out, err := exec.Command("sh", "-c", "blkid -t TYPE=vfat -o device").CombinedOutput()
+	type LsblkOutput struct {
+		Blockdevices []struct {
+			Name     string `json:"name"`
+			Size     string `json:"size"`
+			Fstype   string `json:"fstype"`
+			Pkname   string `json:"pkname"`
+			DiskSize string `json:"disk-size"`
+			Parttype string `json:"parttype"`
+		} `json:"blockdevices"`
+	}
+
+	out, err := exec.Command("lsblk", "-l", "-b", "-n", "-p", "-o", "NAME,SIZE,FSTYPE,PKNAME,DISK-SIZE,PARTTYPE", "--json").CombinedOutput()
 	if err != nil {
 		return []string{}
 	}
 
+	var data LsblkOutput
+	if err := json.Unmarshal(out, &data); err != nil {
+		return []string{}
+	}
+
 	var partitions []string
-	devices := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, dev := range data.Blockdevices {
+		isEFI := false
 
-	for _, dev := range devices {
-		if dev == "" {
-			continue
+		if strings.ToLower(dev.Parttype) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" {
+			isEFI = true
 		}
-		lsblkOut, err := exec.Command("lsblk", "-n", "-p", "-o", "NAME,SIZE,PKNAME,DISK-SIZE", dev).CombinedOutput()
-		if err != nil {
-			continue
-		}
-		parts := strings.Fields(strings.TrimSpace(string(lsblkOut)))
-		if len(parts) >= 2 {
-			name := parts[0]
-			size := parts[1]
-			parent := "unknown"
-			if len(parts) >= 3 {
-				parent = parts[2]
+
+		if !isEFI && strings.ToLower(dev.Fstype) == "vfat" {
+			if !strings.Contains(dev.Name, "loop") && !strings.Contains(dev.Name, "airootfs") {
+				isEFI = true
 			}
-			diskSize := "unknown"
-			if len(parts) >= 4 {
-				diskSize = parts[3]
+		}
+
+		if isEFI {
+			parent := dev.Pkname
+			if parent == "" {
+				parent = "unknown"
 			}
 
-			entry := fmt.Sprintf("%s (%s) | Disk: %s [%s]", name, size, parent, diskSize)
+			dSize := dev.DiskSize
+			if dSize == "" {
+				dSize = "unknown"
+			}
+
+			sizeBytes, err := strconv.ParseInt(dev.Size, 10, 64)
+			sizeStr := dev.Size
+			if err == nil {
+				sizeStr = fmt.Sprintf("%.0fM", float64(sizeBytes)/(1024*1024))
+			}
+
+			if dSizeBytes, err := strconv.ParseInt(dSize, 10, 64); err == nil {
+				dSize = fmt.Sprintf("%.0fG", float64(dSizeBytes)/(1024*1024*1024))
+			}
+
+			entry := fmt.Sprintf("%s (%s) | Disk: %s [%s]", dev.Name, sizeStr, parent, dSize)
 			partitions = append(partitions, entry)
 		}
 	}

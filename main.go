@@ -911,12 +911,12 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				}
 				out, err := exec.Command("pamu2fcfg", "-u", m.username).CombinedOutput()
 				trimmedOut := bytes.TrimSpace(out)
-				if err != nil || len(trimmedOut) == 0 {
-					if err != nil {
-						ch <- errMsg{err: fmt.Errorf("failed to generate u2f mapping: %v\nOutput: %s", err, string(out))}
-					} else {
-						ch <- errMsg{err: fmt.Errorf("failed to generate u2f mapping: pamu2fcfg returned empty output")}
-					}
+				switch {
+				case err != nil:
+					ch <- errMsg{err: fmt.Errorf("failed to generate u2f mapping: %v\nOutput: %s", err, string(out))}
+					return
+				case len(trimmedOut) == 0:
+					ch <- errMsg{err: fmt.Errorf("failed to generate u2f mapping: pamu2fcfg returned empty output")}
 					return
 				}
 				if err := os.WriteFile("/mnt/etc/u2f_mappings", trimmedOut, 0600); err != nil {

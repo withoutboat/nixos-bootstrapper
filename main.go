@@ -905,10 +905,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				}
 
 				m.logs = append(m.logs, "⏳ Awaiting YubiKey touch to generate U2F mapping...")
-				if err := os.MkdirAll("/mnt/etc", 0755); err != nil {
-					ch <- errMsg{err: fmt.Errorf("failed to create directory /mnt/etc for u2f mapping: %v", err)}
-					return
-				}
 				out, err := exec.Command("pamu2fcfg", "-u", m.username).CombinedOutput()
 				trimmedOut := bytes.TrimSpace(out)
 				switch {
@@ -917,6 +913,10 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 					return
 				case len(trimmedOut) == 0:
 					ch <- errMsg{err: fmt.Errorf("failed to generate u2f mapping: pamu2fcfg returned empty output (ensure YubiKey is inserted and accessible)")}
+					return
+				}
+				if err := os.MkdirAll("/mnt/etc", 0755); err != nil {
+					ch <- errMsg{err: fmt.Errorf("failed to create directory /mnt/etc for u2f mapping: %v", err)}
 					return
 				}
 				if err := os.WriteFile("/mnt/etc/u2f_mappings", trimmedOut, 0600); err != nil {

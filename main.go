@@ -719,7 +719,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				}
 			}
 			if m.yubiSerial == "" {
-				m.yubiSerial = "fallback-hardware-token-salt-2026"
+				return errMsg{err: fmt.Errorf("failed to extract YubiKey serial from ykman output: %q", strings.TrimSpace(string(out)))}
 			}
 			return stepCompleteMsg(stepIdx)
 
@@ -880,17 +880,15 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			)
 
 			enrollOut, err := enrollCmd.CombinedOutput()
+			_ = os.Remove(passFile)
 			if err != nil {
 				enrollLog := strings.TrimSpace(string(enrollOut))
 				if enrollLog == "" {
 					enrollLog = err.Error()
 				}
-				m.logs = append(m.logs, "⚠️ LUKS YubiKey enrollment skipped: "+enrollLog)
-			} else {
-				m.logs = append(m.logs, "✅ YubiKey enrolled to LUKS successfully.")
+				return errMsg{err: fmt.Errorf("failed to enroll YubiKey for LUKS unlock: %s", enrollLog)}
 			}
-
-			_ = os.Remove(passFile)
+			m.logs = append(m.logs, "✅ YubiKey enrolled to LUKS successfully.")
 
 			msgChan := make(chan tea.Msg)
 			go func(ch chan tea.Msg, homeDir string, bDir string) {

@@ -1059,7 +1059,8 @@ func injectRuntimeSpec(configStr string, spec runtimeSpec, intelID, nvidiaID str
 
 func nixStringLiteral(value string) string {
 	var escaped strings.Builder
-	escaped.Grow(len(value) + 16)
+	escaped.Grow(len(value) + len(value)/2 + 2)
+	escaped.WriteByte('"')
 
 	for i := 0; i < len(value); i++ {
 		switch value[i] {
@@ -1085,7 +1086,8 @@ func nixStringLiteral(value string) string {
 		}
 	}
 
-	return fmt.Sprintf("\"%s\"", escaped.String())
+	escaped.WriteByte('"')
+	return escaped.String()
 }
 
 func main() {

@@ -595,9 +595,9 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 		switch stepIdx {
 		case 0:
 			requiredTools := []string{"ykman", "pamu2fcfg", "systemd-cryptenroll"}
-			for _, tool := range requiredTools {
-				if _, err := exec.LookPath(tool); err != nil {
-					return errMsg{err: fmt.Errorf("required YubiKey/FIDO2 tool missing or inaccessible: %s (%v)", tool, err)}
+			for _, requiredTool := range requiredTools {
+				if _, err := exec.LookPath(requiredTool); err != nil {
+					return errMsg{err: fmt.Errorf("required YubiKey/FIDO2 tool missing or inaccessible: %s (%v)", requiredTool, err)}
 				}
 			}
 			time.Sleep(300 * time.Millisecond)
@@ -906,7 +906,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 
 				m.logs = append(m.logs, "⏳ Awaiting YubiKey touch to generate U2F mapping...")
 				if err := os.MkdirAll("/mnt/etc", 0755); err != nil {
-					ch <- errMsg{err: fmt.Errorf("failed to prepare /mnt/etc for u2f mapping: %v", err)}
+					ch <- errMsg{err: fmt.Errorf("failed to create directory /mnt/etc for u2f mapping: %v", err)}
 					return
 				}
 				out, err := exec.Command("pamu2fcfg", "-u", m.username).CombinedOutput()
@@ -916,7 +916,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 					ch <- errMsg{err: fmt.Errorf("failed to generate u2f mapping: %v\nOutput: %s", err, string(out))}
 					return
 				case len(trimmedOut) == 0:
-					ch <- errMsg{err: fmt.Errorf("failed to generate u2f mapping: pamu2fcfg returned empty output")}
+					ch <- errMsg{err: fmt.Errorf("failed to generate u2f mapping: pamu2fcfg returned empty output (ensure YubiKey is inserted and accessible)")}
 					return
 				}
 				if err := os.WriteFile("/mnt/etc/u2f_mappings", trimmedOut, 0600); err != nil {

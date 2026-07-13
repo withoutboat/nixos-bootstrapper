@@ -57,6 +57,15 @@ type Config struct {
 	Hosts []string `json:"hosts"`
 }
 
+type runtimeSpec struct {
+	username   string
+	cpu        string
+	gpu        string
+	nvidiaOpen bool
+	wifiSSID   string
+	wifiPass   string
+}
+
 type model struct {
 	state         sessionState
 	hosts         []string
@@ -748,7 +757,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("hardware topology inspection failed: %v\nOutput: %s", err, string(out))}
 			}
 			configStr := string(out)
-			lastBrace := strings.LastIndex(configStr, "}")
 			cpuProfile := detectCPU()
 			gpuProfile := detectGPU()
 			nvidiaOpen := isNvidiaOpenCapable()
@@ -758,43 +766,16 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			bootUUIDOut, _ := bootUUIDCmd.Output()
 			bootUUID := strings.TrimSpace(string(bootUUIDOut))
 
-			var efiUUID string
-			if m.targetEFIDisk != "" {
-				uuidCmd := exec.Command("blkid", "-s", "UUID", "-o", "value", m.targetEFIDisk)
-				uuidOut, _ := uuidCmd.Output()
-				efiUUID = strings.TrimSpace(string(uuidOut))
-			}
-
-			if lastBrace != -1 && bootUUID != "" {
-				var injection string
-				if m.targetEFIDisk != "" && efiUUID != "" {
-					injection = fmt.Sprintf(`
-            _module.args.spec = {
-              username = "%s";
-              cpu = "%s";
-              gpu = "%s";
-              nvidiaOpen = %t;
-            };
-            hardware.nvidia.prime = {
-              intelBusId = "%s";
-              nvidiaBusId = "%s";
-            };
-          `, m.username, cpuProfile, gpuProfile, nvidiaOpen, intelID, nvidiaID)
-				} else {
-					injection = fmt.Sprintf(`
-            _module.args.spec = {
-              username = "%s";
-              cpu = "%s";
-              gpu = "%s";
-              nvidiaOpen = %t;
-            };
-            hardware.nvidia.prime = {
-              intelBusId = "%s";
-              nvidiaBusId = "%s";
-            };
-          `, m.username, cpuProfile, gpuProfile, nvidiaOpen, intelID, nvidiaID)
+			if bootUUID != "" {
+				spec := runtimeSpec{
+					username:   m.username,
+					cpu:        cpuProfile,
+					gpu:        gpuProfile,
+					nvidiaOpen: nvidiaOpen,
+					wifiSSID:   m.wifiSSID,
+					wifiPass:   m.wifiPass,
 				}
-				configStr = configStr[:lastBrace] + injection + configStr[lastBrace:]
+				configStr = injectRuntimeSpec(configStr, spec, intelID, nvidiaID)
 			}
 
 			hardwareFile := filepath.Join(targetSysConfigDir, "hardware-configuration.nix")
@@ -1039,6 +1020,50 @@ func getWiFiNetworks() []string {
 	}
 	ssids = append(ssids, "Manual Entry")
 	return ssids
+}
+
+func injectRuntimeSpec(configStr string, spec runtimeSpec, intelID, nvidiaID string) string {
+	lastBrace := strings.LastIndex(configStr, "}")
+	if lastBrace == -1 {
+		return configStr
+	}
+
+	injection := fmt.Sprintf(`
+            _module.args.spec = {
+              username = %s;
+              cpu = %s;
+              gpu = %s;
+              nvidiaOpen = %t;
+              wifiSSID = %s;
+              wifiPass = %s;
+            };
+            hardware.nvidia.prime = {
+              intelBusId = %s;
+              nvidiaBusId = %s;
+            };
+          `,
+		nixStringLiteral(spec.username),
+		nixStringLiteral(spec.cpu),
+		nixStringLiteral(spec.gpu),
+		spec.nvidiaOpen,
+		nixStringLiteral(spec.wifiSSID),
+		nixStringLiteral(spec.wifiPass),
+		nixStringLiteral(intelID),
+		nixStringLiteral(nvidiaID),
+	)
+
+	return configStr[:lastBrace] + injection + configStr[lastBrace:]
+}
+
+func nixStringLiteral(value string) string {
+	return fmt.Sprintf("\"%s\"", strings.NewReplacer(
+		"\\", "\\\\",
+		"\"", "\\\"",
+		"\n", "\\n",
+		"\r", "\\r",
+		"\t", "\\t",
+		"${", "\\${",
+	).Replace(value))
 }
 
 func main() {

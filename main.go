@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -593,9 +594,11 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 	return func() tea.Msg {
 		switch stepIdx {
 		case 0:
-			out, err := exec.Command("ykman", "--version").CombinedOutput()
-			if err != nil {
-				return errMsg{err: fmt.Errorf("yubikey manager (ykman) missing: %v\nOutput: %s", err, string(out))}
+			requiredTools := []string{"ykman", "pamu2fcfg", "systemd-cryptenroll"}
+			for _, tool := range requiredTools {
+				if _, err := exec.LookPath(tool); err != nil {
+					return errMsg{err: fmt.Errorf("required YubiKey/FIDO2 tool missing from PATH: %s", tool)}
+				}
 			}
 			time.Sleep(300 * time.Millisecond)
 			return stepCompleteMsg(stepIdx)
@@ -876,8 +879,13 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				"/dev/disk/by-partlabel/disk-main-luks",
 			)
 
-			if _, err := enrollCmd.CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("⚠️ LUKS YubiKey Error (ignored): %v", err)}
+			enrollOut, err := enrollCmd.CombinedOutput()
+			if err != nil {
+				enrollLog := strings.TrimSpace(string(enrollOut))
+				if enrollLog == "" {
+					enrollLog = err.Error()
+				}
+				m.logs = append(m.logs, "⚠️ LUKS YubiKey enrollment skipped: "+enrollLog)
 			} else {
 				m.logs = append(m.logs, "✅ YubiKey enrolled to LUKS successfully.")
 			}
@@ -897,9 +905,22 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				}
 
 				m.logs = append(m.logs, "⏳ Awaiting YubiKey touch to generate U2F mapping...")
-				mappingCmd := fmt.Sprintf("pamu2fcfg -u %s > /mnt/etc/u2f_mappings", m.username)
-				if out, err := exec.Command("sh", "-c", mappingCmd).CombinedOutput(); err != nil {
+				if err := os.MkdirAll("/mnt/etc", 0755); err != nil {
+					ch <- errMsg{err: fmt.Errorf("failed to prepare /mnt/etc for u2f mapping: %v", err)}
+					return
+				}
+				out, err := exec.Command("pamu2fcfg", "-u", m.username).CombinedOutput()
+				if err != nil {
 					ch <- errMsg{err: fmt.Errorf("failed to generate u2f mapping: %v\nOutput: %s", err, string(out))}
+					return
+				}
+				if len(bytes.TrimSpace(out)) == 0 {
+					ch <- errMsg{err: fmt.Errorf("failed to generate u2f mapping: pamu2fcfg returned empty output")}
+					return
+				}
+				if err := os.WriteFile("/mnt/etc/u2f_mappings", out, 0600); err != nil {
+					ch <- errMsg{err: fmt.Errorf("failed to write /mnt/etc/u2f_mappings: %v", err)}
+					return
 				}
 				m.logs = append(m.logs, "✅ U2F mapping generated successfully.")
 

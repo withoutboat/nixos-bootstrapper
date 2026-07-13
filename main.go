@@ -22,7 +22,7 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-var BuildDate = "version 16 (Multi-EFI / XBOOTLDR)"
+var BuildDate = "version 17 (Multi-EFI / XBOOTLDR)"
 
 var (
 	titleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F5D4")).Bold(true).MarginLeft(2)
@@ -604,8 +604,10 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			disk := m.targetDisk
 
 			exec.Command("umount", "-R", "/mnt").Run()
+			exec.Command("umount", "-l", "/mnt").Run()
 			exec.Command("swapoff", "-a").Run()
 			exec.Command("cryptsetup", "close", "cryptroot").Run()
+			exec.Command("dmsetup", "remove", "-f", "cryptroot").Run()
 
 			if out, err := exec.Command("sgdisk", "-Z", disk).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to wipe target disk: %v\nOutput: %s", err, string(out))}
@@ -633,17 +635,20 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("failed to format boot/xbootldr (fat32): %v\nOutput: %s", err, string(out))}
 			}
 
-			if out, err := exec.Command("sgdisk", "-n", rootPartNum+":0:0", "-t", rootPartNum+":8300", "-c", rootPartNum+":disk-main-luks", disk).CombinedOutput(); err != nil {
+			if out, err := exec.Command("sgdisk", "-n", rootPartNum+":0:0", "-t", rootPartNum+":8300", "-c", rootPartNum+":disk-main-luks-setup", disk).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to create root partition: %v\nOutput: %s", err, string(out))}
 			}
 
 			exec.Command("partprobe", disk).Run()
-			time.Sleep(2 * time.Second) // Ждем инициализации udev
+			time.Sleep(2 * time.Second)
 
 			rootPart := disk + rootPartNum
 			if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
 				rootPart = disk + "p" + rootPartNum
 			}
+
+			exec.Command("wipefs", "-a", rootPart).Run()
+			time.Sleep(1 * time.Second)
 
 			luksFormatCmd := exec.Command("cryptsetup", "luksFormat", "--type", "luks2", "--batch-mode", rootPart, "--key-file", "-")
 			luksFormatCmd.Stdin = strings.NewReader(m.masterPhrase)
@@ -680,6 +685,11 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 					return errMsg{err: fmt.Errorf("failed to mount existing efi to /mnt/efi: %v\nOutput: %s", err, string(out))}
 				}
 			}
+
+			if out, err := exec.Command("sgdisk", "-c", rootPartNum+":disk-main-luks", disk).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to set final partlabel: %v\nOutput: %s", err, string(out))}
+			}
+			exec.Command("partprobe", disk).Run()
 
 			return stepCompleteMsg(stepIdx)
 

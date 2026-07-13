@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -593,9 +594,11 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 	return func() tea.Msg {
 		switch stepIdx {
 		case 0:
-			out, err := exec.Command("ykman", "--version").CombinedOutput()
-			if err != nil {
-				return errMsg{err: fmt.Errorf("yubikey manager (ykman) missing: %v\nOutput: %s", err, string(out))}
+			requiredTools := []string{"ykman", "pamu2fcfg", "systemd-cryptenroll"}
+			for _, requiredTool := range requiredTools {
+				if _, err := exec.LookPath(requiredTool); err != nil {
+					return errMsg{err: fmt.Errorf("required YubiKey/FIDO2 tool missing or inaccessible: %s (%v)", requiredTool, err)}
+				}
 			}
 			time.Sleep(300 * time.Millisecond)
 			return stepCompleteMsg(stepIdx)
@@ -716,7 +719,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				}
 			}
 			if m.yubiSerial == "" {
-				m.yubiSerial = "fallback-hardware-token-salt-2026"
+				return errMsg{err: fmt.Errorf("failed to extract YubiKey serial from ykman output: %q", strings.TrimSpace(string(out)))}
 			}
 			return stepCompleteMsg(stepIdx)
 
@@ -876,13 +879,16 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				"/dev/disk/by-partlabel/disk-main-luks",
 			)
 
-			if _, err := enrollCmd.CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("⚠️ LUKS YubiKey Error (ignored): %v", err)}
-			} else {
-				m.logs = append(m.logs, "✅ YubiKey enrolled to LUKS successfully.")
-			}
-
+			enrollOut, err := enrollCmd.CombinedOutput()
 			_ = os.Remove(passFile)
+			if err != nil {
+				enrollLog := strings.TrimSpace(string(enrollOut))
+				if enrollLog == "" {
+					enrollLog = err.Error()
+				}
+				return errMsg{err: fmt.Errorf("failed to enroll YubiKey for LUKS unlock: %s", enrollLog)}
+			}
+			m.logs = append(m.logs, "✅ YubiKey enrolled to LUKS successfully.")
 
 			msgChan := make(chan tea.Msg)
 			go func(ch chan tea.Msg, homeDir string, bDir string) {
@@ -897,9 +903,23 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				}
 
 				m.logs = append(m.logs, "⏳ Awaiting YubiKey touch to generate U2F mapping...")
-				mappingCmd := fmt.Sprintf("pamu2fcfg -u %s > /mnt/etc/u2f_mappings", m.username)
-				if out, err := exec.Command("sh", "-c", mappingCmd).CombinedOutput(); err != nil {
+				out, err := exec.Command("pamu2fcfg", "-u", m.username).CombinedOutput()
+				trimmedOut := bytes.TrimSpace(out)
+				switch {
+				case err != nil:
 					ch <- errMsg{err: fmt.Errorf("failed to generate u2f mapping: %v\nOutput: %s", err, string(out))}
+					return
+				case len(trimmedOut) == 0:
+					ch <- errMsg{err: fmt.Errorf("failed to generate u2f mapping: pamu2fcfg returned empty output (ensure YubiKey is inserted and accessible)")}
+					return
+				}
+				if err := os.MkdirAll("/mnt/etc", 0755); err != nil {
+					ch <- errMsg{err: fmt.Errorf("failed to create directory /mnt/etc for u2f mapping: %v", err)}
+					return
+				}
+				if err := os.WriteFile("/mnt/etc/u2f_mappings", trimmedOut, 0600); err != nil {
+					ch <- errMsg{err: fmt.Errorf("failed to write /mnt/etc/u2f_mappings: %v", err)}
+					return
 				}
 				m.logs = append(m.logs, "✅ U2F mapping generated successfully.")
 

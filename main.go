@@ -597,7 +597,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			requiredTools := []string{"ykman", "pamu2fcfg", "systemd-cryptenroll"}
 			for _, tool := range requiredTools {
 				if _, err := exec.LookPath(tool); err != nil {
-					return errMsg{err: fmt.Errorf("required YubiKey/FIDO2 tool missing from PATH: %s", tool)}
+					return errMsg{err: fmt.Errorf("required YubiKey/FIDO2 tool missing or inaccessible: %s (%v)", tool, err)}
 				}
 			}
 			time.Sleep(300 * time.Millisecond)
@@ -910,15 +910,16 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 					return
 				}
 				out, err := exec.Command("pamu2fcfg", "-u", m.username).CombinedOutput()
-				if err != nil {
-					ch <- errMsg{err: fmt.Errorf("failed to generate u2f mapping: %v\nOutput: %s", err, string(out))}
+				trimmedOut := bytes.TrimSpace(out)
+				if err != nil || len(trimmedOut) == 0 {
+					if err != nil {
+						ch <- errMsg{err: fmt.Errorf("failed to generate u2f mapping: %v\nOutput: %s", err, string(out))}
+					} else {
+						ch <- errMsg{err: fmt.Errorf("failed to generate u2f mapping: pamu2fcfg returned empty output")}
+					}
 					return
 				}
-				if len(bytes.TrimSpace(out)) == 0 {
-					ch <- errMsg{err: fmt.Errorf("failed to generate u2f mapping: pamu2fcfg returned empty output")}
-					return
-				}
-				if err := os.WriteFile("/mnt/etc/u2f_mappings", out, 0600); err != nil {
+				if err := os.WriteFile("/mnt/etc/u2f_mappings", trimmedOut, 0600); err != nil {
 					ch <- errMsg{err: fmt.Errorf("failed to write /mnt/etc/u2f_mappings: %v", err)}
 					return
 				}

@@ -31,7 +31,7 @@ func TestInjectRuntimeSpecIncludesWiFiData(t *testing.T) {
 	}
 }
 
-func TestInjectRuntimeSpecWithoutClosingBraceLeavesConfigUnchanged(t *testing.T) {
+func TestInjectRuntimeSpecMissingBrace(t *testing.T) {
 	base := "{\n"
 
 	if got := injectRuntimeSpec(base, runtimeSpec{}, "", ""); got != base {

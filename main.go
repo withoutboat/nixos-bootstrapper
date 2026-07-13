@@ -778,6 +778,8 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				configStr = injectRuntimeSpec(configStr, spec, intelID, nvidiaID)
 			}
 
+			// Persist machine-local spec data here because nix-core consumes `spec`
+			// from the generated, gitignored hardware config on future rebuilds.
 			hardwareFile := filepath.Join(targetSysConfigDir, "hardware-configuration.nix")
 			if err := os.WriteFile(hardwareFile, []byte(configStr), 0600); err != nil {
 				return errMsg{err: fmt.Errorf("failed writing hardware-configuration.nix: %v", err)}
@@ -1072,6 +1074,7 @@ func nixStringLiteral(value string) string {
 		case '\t':
 			escaped.WriteString("\\t")
 		case '$':
+			// In Nix double-quoted strings only `${...}` starts interpolation.
 			if i+1 < len(value) && value[i+1] == '{' {
 				escaped.WriteString("\\$")
 			} else {

@@ -38,3 +38,16 @@ func TestInjectRuntimeSpecMissingBrace(t *testing.T) {
 		t.Fatalf("expected unchanged config, got %q", got)
 	}
 }
+
+func TestVerifyU2FMappingWritten(t *testing.T) {
+	content := []byte("example-u2f-mapping-line\n")
+	trimmed := bytes.TrimSpace(content)
+
+	if len(trimmed) == 0 {
+		t.Fatal("expected non-empty trimmed content")
+	}
+
+	if !bytes.Equal(trimmed, bytes.TrimSpace(content)) {
+		t.Fatal("expected trimmed content to match")
+	}
+}

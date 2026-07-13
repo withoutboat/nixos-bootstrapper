@@ -57,6 +57,15 @@ type Config struct {
 	Hosts []string `json:"hosts"`
 }
 
+type runtimeSpec struct {
+	username   string
+	cpu        string
+	gpu        string
+	nvidiaOpen bool
+	wifiSSID   string
+	wifiPass   string
+}
+
 type model struct {
 	state         sessionState
 	hosts         []string
@@ -748,7 +757,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 				return errMsg{err: fmt.Errorf("hardware topology inspection failed: %v\nOutput: %s", err, string(out))}
 			}
 			configStr := string(out)
-			lastBrace := strings.LastIndex(configStr, "}")
 			cpuProfile := detectCPU()
 			gpuProfile := detectGPU()
 			nvidiaOpen := isNvidiaOpenCapable()
@@ -758,47 +766,22 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			bootUUIDOut, _ := bootUUIDCmd.Output()
 			bootUUID := strings.TrimSpace(string(bootUUIDOut))
 
-			var efiUUID string
-			if m.targetEFIDisk != "" {
-				uuidCmd := exec.Command("blkid", "-s", "UUID", "-o", "value", m.targetEFIDisk)
-				uuidOut, _ := uuidCmd.Output()
-				efiUUID = strings.TrimSpace(string(uuidOut))
-			}
-
-			if lastBrace != -1 && bootUUID != "" {
-				var injection string
-				if m.targetEFIDisk != "" && efiUUID != "" {
-					injection = fmt.Sprintf(`
-            _module.args.spec = {
-              username = "%s";
-              cpu = "%s";
-              gpu = "%s";
-              nvidiaOpen = %t;
-            };
-            hardware.nvidia.prime = {
-              intelBusId = "%s";
-              nvidiaBusId = "%s";
-            };
-          `, m.username, cpuProfile, gpuProfile, nvidiaOpen, intelID, nvidiaID)
-				} else {
-					injection = fmt.Sprintf(`
-            _module.args.spec = {
-              username = "%s";
-              cpu = "%s";
-              gpu = "%s";
-              nvidiaOpen = %t;
-            };
-            hardware.nvidia.prime = {
-              intelBusId = "%s";
-              nvidiaBusId = "%s";
-            };
-          `, m.username, cpuProfile, gpuProfile, nvidiaOpen, intelID, nvidiaID)
+			if bootUUID != "" {
+				spec := runtimeSpec{
+					username:   m.username,
+					cpu:        cpuProfile,
+					gpu:        gpuProfile,
+					nvidiaOpen: nvidiaOpen,
+					wifiSSID:   m.wifiSSID,
+					wifiPass:   m.wifiPass,
 				}
-				configStr = configStr[:lastBrace] + injection + configStr[lastBrace:]
+				configStr = injectRuntimeSpec(configStr, spec, intelID, nvidiaID)
 			}
 
+			// Persist machine-local spec data here because nix-core consumes `spec`
+			// from the generated, gitignored hardware config on future rebuilds.
 			hardwareFile := filepath.Join(targetSysConfigDir, "hardware-configuration.nix")
-			if err := os.WriteFile(hardwareFile, []byte(configStr), 0644); err != nil {
+			if err := os.WriteFile(hardwareFile, []byte(configStr), 0600); err != nil {
 				return errMsg{err: fmt.Errorf("failed writing hardware-configuration.nix: %v", err)}
 			}
 			return stepCompleteMsg(stepIdx)
@@ -1039,6 +1022,72 @@ func getWiFiNetworks() []string {
 	}
 	ssids = append(ssids, "Manual Entry")
 	return ssids
+}
+
+func injectRuntimeSpec(configStr string, spec runtimeSpec, intelID, nvidiaID string) string {
+	lastBrace := strings.LastIndex(configStr, "}")
+	if lastBrace == -1 {
+		return configStr
+	}
+
+	injection := fmt.Sprintf(`
+            _module.args.spec = {
+              username = %s;
+              cpu = %s;
+              gpu = %s;
+              nvidiaOpen = %t;
+              wifiSSID = %s;
+              wifiPass = %s;
+            };
+            hardware.nvidia.prime = {
+              intelBusId = %s;
+              nvidiaBusId = %s;
+            };
+          `,
+		nixStringLiteral(spec.username),
+		nixStringLiteral(spec.cpu),
+		nixStringLiteral(spec.gpu),
+		spec.nvidiaOpen,
+		nixStringLiteral(spec.wifiSSID),
+		nixStringLiteral(spec.wifiPass),
+		nixStringLiteral(intelID),
+		nixStringLiteral(nvidiaID),
+	)
+
+	return configStr[:lastBrace] + injection + configStr[lastBrace:]
+}
+
+func nixStringLiteral(value string) string {
+	var escaped strings.Builder
+	escaped.Grow(len(value) + len(value)/2 + 2)
+	escaped.WriteByte('"')
+
+	for i := 0; i < len(value); i++ {
+		switch value[i] {
+		case '\\':
+			escaped.WriteString("\\\\")
+		case '"':
+			escaped.WriteString("\\\"")
+		case '\n':
+			escaped.WriteString("\\n")
+		case '\r':
+			escaped.WriteString("\\r")
+		case '\t':
+			escaped.WriteString("\\t")
+		case '$':
+			// In Nix double-quoted strings only `${...}` starts interpolation.
+			if i+1 < len(value) && value[i+1] == '{' {
+				escaped.WriteString("\\$")
+			} else {
+				escaped.WriteByte(value[i])
+			}
+		default:
+			escaped.WriteByte(value[i])
+		}
+	}
+
+	escaped.WriteByte('"')
+	return escaped.String()
 }
 
 func main() {

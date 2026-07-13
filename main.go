@@ -779,7 +779,7 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			}
 
 			hardwareFile := filepath.Join(targetSysConfigDir, "hardware-configuration.nix")
-			if err := os.WriteFile(hardwareFile, []byte(configStr), 0644); err != nil {
+			if err := os.WriteFile(hardwareFile, []byte(configStr), 0600); err != nil {
 				return errMsg{err: fmt.Errorf("failed writing hardware-configuration.nix: %v", err)}
 			}
 			return stepCompleteMsg(stepIdx)
@@ -1056,14 +1056,33 @@ func injectRuntimeSpec(configStr string, spec runtimeSpec, intelID, nvidiaID str
 }
 
 func nixStringLiteral(value string) string {
-	return fmt.Sprintf("\"%s\"", strings.NewReplacer(
-		"\\", "\\\\",
-		"\"", "\\\"",
-		"\n", "\\n",
-		"\r", "\\r",
-		"\t", "\\t",
-		"${", "\\${",
-	).Replace(value))
+	var escaped strings.Builder
+	escaped.Grow(len(value))
+
+	for i := 0; i < len(value); i++ {
+		switch value[i] {
+		case '\\':
+			escaped.WriteString("\\\\")
+		case '"':
+			escaped.WriteString("\\\"")
+		case '\n':
+			escaped.WriteString("\\n")
+		case '\r':
+			escaped.WriteString("\\r")
+		case '\t':
+			escaped.WriteString("\\t")
+		case '$':
+			if i+1 < len(value) && value[i+1] == '{' {
+				escaped.WriteString("\\$")
+			} else {
+				escaped.WriteByte(value[i])
+			}
+		default:
+			escaped.WriteByte(value[i])
+		}
+	}
+
+	return fmt.Sprintf("\"%s\"", escaped.String())
 }
 
 func main() {

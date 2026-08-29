@@ -1,12 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestInjectRuntimeSpecIncludesWiFiData(t *testing.T) {
-	base := "{\n}\n"
+func TestRenderRuntimeConfigurationIncludesRuntimeData(t *testing.T) {
 	spec := runtimeSpec{
 		username:   "alice",
 		cpu:        "intel",
@@ -16,12 +17,15 @@ func TestInjectRuntimeSpecIncludesWiFiData(t *testing.T) {
 		wifiPass:   `pa\ss${word}`,
 	}
 
-	got := injectRuntimeSpec(base, spec, "PCI:0:2:0", "PCI:1:0:0")
+	got := renderRuntimeConfiguration(spec, "PCI:0:2:0", "PCI:1:0:0")
 
 	for _, want := range []string{
 		`wifiSSID = "Cafe \"WiFi\""`,
 		`wifiPass = "pa\\ss\${word}"`,
 		`username = "alice"`,
+		`cpu = "intel"`,
+		`gpu = "nvidia"`,
+		`nvidiaOpen = true`,
 		`intelBusId = "PCI:0:2:0"`,
 		`nvidiaBusId = "PCI:1:0:0"`,
 	} {
@@ -31,11 +35,44 @@ func TestInjectRuntimeSpecIncludesWiFiData(t *testing.T) {
 	}
 }
 
-func TestInjectRuntimeSpecMissingBrace(t *testing.T) {
-	base := "{\n"
+func TestRenderRuntimeConfigurationDoesNotMutateHardwareContent(t *testing.T) {
+	hardware := "{\n  fileSystems.\"/\" = { };\n}\n"
+	rendered := renderRuntimeConfiguration(runtimeSpec{username: "alice"}, "PCI:0:2:0", "PCI:1:0:0")
 
-	if got := injectRuntimeSpec(base, runtimeSpec{}, "", ""); got != base {
-		t.Fatalf("expected unchanged config, got %q", got)
+	if !strings.Contains(rendered, `_module.args.spec = {`) {
+		t.Fatalf("expected configuration output to contain runtime spec, got:\n%s", rendered)
+	}
+	if strings.Contains(hardware, `_module.args.spec = {`) {
+		t.Fatalf("expected hardware fixture to remain runtime-free, got:\n%s", hardware)
+	}
+}
+
+func TestBuildHostPathsUsesHostsDirectory(t *testing.T) {
+	got, err := buildHostPaths("/tmp/nix-core", "pc-th")
+	if err != nil {
+		t.Fatalf("buildHostPaths returned error: %v", err)
+	}
+
+	wantDir := filepath.Join("/tmp/nix-core", "hosts", "pc-th")
+	if got.Dir != wantDir {
+		t.Fatalf("expected dir %q, got %q", wantDir, got.Dir)
+	}
+	if got.Default != filepath.Join(wantDir, "default.nix") {
+		t.Fatalf("unexpected default path: %q", got.Default)
+	}
+	if got.Hardware != filepath.Join(wantDir, "hardware.nix") {
+		t.Fatalf("unexpected hardware path: %q", got.Hardware)
+	}
+	if got.Configuration != filepath.Join(wantDir, "configuration.nix") {
+		t.Fatalf("unexpected configuration path: %q", got.Configuration)
+	}
+}
+
+func TestValidateHostNameRejectsTraversal(t *testing.T) {
+	for _, host := range []string{"../pc-th", "pc/th", "", "pc th"} {
+		if err := validateHostName(host); err == nil {
+			t.Fatalf("expected host %q to be rejected", host)
+		}
 	}
 }
 

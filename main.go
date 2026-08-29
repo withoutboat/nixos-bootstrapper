@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -31,6 +32,7 @@ var (
 	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F5D4")).Bold(true)
 	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF007F")).Bold(true)
 	focusedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F5D4")).Bold(true)
+	hostNameRE   = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 )
 
 type sessionState int
@@ -76,6 +78,7 @@ type model struct {
 	efiPartitions []string
 	selectedEFI   int
 	targetEFIDisk string
+	targetEFIRoot string
 	wifis         []string
 	selectedWiFi  int
 	wifiSSID      string
@@ -194,6 +197,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selectedHost++
 				}
 			case "enter":
+				if err := validateHostName(m.hosts[m.selectedHost]); err != nil {
+					m.err = err
+					m.state = stateFailed
+					return m, nil
+				}
 				m.disks = getAvailableDisks()
 				if len(m.disks) == 0 {
 					m.err = fmt.Errorf("no suitable disks found for installation")
@@ -249,13 +257,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				selection := m.efiPartitions[m.selectedEFI]
 				if strings.Contains(selection, "Create New EFI Partition") {
 					m.targetEFIDisk = ""
+					m.targetEFIRoot = ""
 					m.logs = append(m.logs, "💿 EFI Choice: Will create new EFI partition on target disk.")
 				} else {
-					parts := strings.Split(selection, " ")
-					if len(parts) > 0 {
-						rawDisk := strings.TrimSuffix(parts[0], ":")
-						m.targetEFIDisk = strings.TrimSpace(rawDisk)
+					targetEFIDisk, targetEFIRoot, err := parseEFISelection(selection)
+					if err != nil {
+						m.err = err
+						m.state = stateFailed
+						return m, nil
 					}
+					m.targetEFIDisk = targetEFIDisk
+					m.targetEFIRoot = targetEFIRoot
 					m.logs = append(m.logs, fmt.Sprintf("💿 EFI Choice: Using existing partition -> %s", m.targetEFIDisk))
 				}
 				m.state = stateInputUsername
@@ -574,6 +586,15 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			return stepCompleteMsg(stepIdx)
 		case 1:
 			disk := m.targetDisk
+			if m.targetEFIDisk != "" {
+				efiRoot := m.targetEFIRoot
+				if efiRoot == "" {
+					efiRoot = getPartitionParentDisk(m.targetEFIDisk)
+				}
+				if efiRoot != "" && efiRoot == disk {
+					return errMsg{err: fmt.Errorf("selected existing efi partition %s resides on target disk %s; refusing to wipe the disk containing the selected efi", m.targetEFIDisk, disk)}
+				}
+			}
 			exec.Command("umount", "-R", "/mnt").Run()
 			exec.Command("umount", "-l", "/mnt").Run()
 			exec.Command("swapoff", "-a").Run()
@@ -582,32 +603,23 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			if out, err := exec.Command("sgdisk", "-Z", disk).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to wipe target disk: %v\nOutput: %s", err, string(out))}
 			}
-			rootPartNum, bootPartNum := "2", "1"
-			if m.targetEFIDisk != "" {
-				if out, err := exec.Command("sgdisk", "-n", bootPartNum+":0:+1G", "-t", bootPartNum+":ea00", "-c", bootPartNum+":boot", disk).CombinedOutput(); err != nil {
-					return errMsg{err: fmt.Errorf("failed to create xbootldr partition: %v\nOutput: %s", err, string(out))}
-				}
-			} else {
+			rootPartNum, bootPartNum := "1", ""
+			if m.targetEFIDisk == "" {
+				rootPartNum, bootPartNum = "2", "1"
 				if out, err := exec.Command("sgdisk", "-n", bootPartNum+":0:+1G", "-t", bootPartNum+":ef00", "-c", bootPartNum+":boot", disk).CombinedOutput(); err != nil {
 					return errMsg{err: fmt.Errorf("failed to create boot partition: %v\nOutput: %s", err, string(out))}
 				}
-			}
-			bootPart := disk + bootPartNum
-			if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
-				bootPart = disk + "p" + bootPartNum
-			}
-			if out, err := exec.Command("mkfs.fat", "-F", "32", "-n", "boot", bootPart).CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to format boot/xbootldr (fat32): %v\nOutput: %s", err, string(out))}
+				bootPart := partitionPath(disk, bootPartNum)
+				if out, err := exec.Command("mkfs.fat", "-F", "32", "-n", "boot", bootPart).CombinedOutput(); err != nil {
+					return errMsg{err: fmt.Errorf("failed to format boot partition (fat32): %v\nOutput: %s", err, string(out))}
+				}
 			}
 			if out, err := exec.Command("sgdisk", "-n", rootPartNum+":0:0", "-t", rootPartNum+":8300", "-c", rootPartNum+":disk-main-luks-setup", disk).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to create root partition: %v\nOutput: %s", err, string(out))}
 			}
 			exec.Command("partprobe", disk).Run()
 			time.Sleep(2 * time.Second)
-			rootPart := disk + rootPartNum
-			if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
-				rootPart = disk + "p" + rootPartNum
-			}
+			rootPart := partitionPath(disk, rootPartNum)
 			exec.Command("wipefs", "-a", rootPart).Run()
 			time.Sleep(1 * time.Second)
 			luksFormatCmd := exec.Command("cryptsetup", "luksFormat", "--type", "luks2", "--batch-mode", rootPart, "--key-file", "-")
@@ -627,11 +639,13 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			if out, err := exec.Command("mount", "/dev/mapper/cryptroot", "/mnt").CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to mount decrypted root: %v\nOutput: %s", err, string(out))}
 			}
-			exec.Command("mkdir", "-p", "/mnt/boot").Run()
-			if out, err := exec.Command("mount", bootPart, "/mnt/boot").CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to mount boot: %v\nOutput: %s", err, string(out))}
-			}
-			if m.targetEFIDisk != "" {
+			if m.targetEFIDisk == "" {
+				bootPart := partitionPath(disk, bootPartNum)
+				exec.Command("mkdir", "-p", "/mnt/boot").Run()
+				if out, err := exec.Command("mount", bootPart, "/mnt/boot").CombinedOutput(); err != nil {
+					return errMsg{err: fmt.Errorf("failed to mount boot: %v\nOutput: %s", err, string(out))}
+				}
+			} else {
 				exec.Command("mkdir", "-p", "/mnt/efi").Run()
 				exec.Command("umount", m.targetEFIDisk).Run()
 				if out, err := exec.Command("mount", m.targetEFIDisk, "/mnt/efi").CombinedOutput(); err != nil {
@@ -694,16 +708,20 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			gpuProfile := detectGPU()
 			nvidiaOpen := isNvidiaOpenCapable()
 			intelID, nvidiaID := getBusIDs()
-			bootUUIDCmd := exec.Command("sh", "-c", "blkid -s UUID -o value $(findmnt -n -o SOURCE /mnt/boot)")
-			bootUUIDOut, _ := bootUUIDCmd.Output()
-			bootUUID := strings.TrimSpace(string(bootUUIDOut))
-			if bootUUID != "" {
-				spec := runtimeSpec{username: m.username, cpu: cpuProfile, gpu: gpuProfile, nvidiaOpen: nvidiaOpen, wifiSSID: m.wifiSSID, wifiPass: m.wifiPass}
-				configStr = injectRuntimeSpec(configStr, spec, intelID, nvidiaID)
-			}
 			hardwareFile := filepath.Join(targetSysConfigDir, "hardware-configuration.nix")
-			if err := os.WriteFile(hardwareFile, []byte(configStr), 0600); err != nil {
+			if err := os.WriteFile(hardwareFile, []byte(configStr), 0644); err != nil {
 				return errMsg{err: fmt.Errorf("failed writing hardware-configuration.nix: %v", err)}
+			}
+			runtimeConfig := renderRuntimeConfiguration(runtimeSpec{
+				username:   m.username,
+				cpu:        cpuProfile,
+				gpu:        gpuProfile,
+				nvidiaOpen: nvidiaOpen,
+				wifiSSID:   m.wifiSSID,
+				wifiPass:   m.wifiPass,
+			}, intelID, nvidiaID)
+			if err := os.WriteFile(filepath.Join(targetSysConfigDir, "configuration.nix"), []byte(runtimeConfig), 0644); err != nil {
+				return errMsg{err: fmt.Errorf("failed writing configuration.nix: %v", err)}
 			}
 			return stepCompleteMsg(stepIdx)
 		case 7:
@@ -717,8 +735,15 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			if out, err := exec.Command("git", "clone", "https://github.com/withoutboat/nix-home.git", nixHomeDir).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to clone nix-home: %v\nOutput: %s", err, string(out))}
 			}
-			if out, err := exec.Command("cp", "/mnt/etc/nixos/hardware-configuration.nix", filepath.Join(nixCoreDir, "hardware.nix")).CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to copy hardware config: %v", err)}
+			hostPaths, err := ensureHostPaths(nixCoreDir, m.hosts[m.selectedHost])
+			if err != nil {
+				return errMsg{err: err}
+			}
+			if out, err := exec.Command("cp", "/mnt/etc/nixos/hardware-configuration.nix", hostPaths.Hardware).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to copy hardware config: %v\nOutput: %s", err, string(out))}
+			}
+			if out, err := exec.Command("cp", filepath.Join("/mnt/etc/nixos", "configuration.nix"), hostPaths.Configuration).CombinedOutput(); err != nil {
+				return errMsg{err: fmt.Errorf("failed to copy runtime config: %v\nOutput: %s", err, string(out))}
 			}
 
 			buildDir, err := os.MkdirTemp("/tmp", "nix-build-flake-*")
@@ -728,9 +753,9 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			if out, err := exec.Command("cp", "-r", nixCoreDir+"/.", buildDir).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to copy nix-core to build dir: %v\nOutput: %s", err, string(out))}
 			}
-			targetHardwareFile := filepath.Join(buildDir, "hardware.nix")
-			if out, err := exec.Command("cp", "/mnt/etc/nixos/hardware-configuration.nix", targetHardwareFile).CombinedOutput(); err != nil {
-				return errMsg{err: fmt.Errorf("failed to copy hardware config: %v\nOutput: %s", err, string(out))}
+			hostBuildPaths, err := buildHostPaths(buildDir, m.hosts[m.selectedHost])
+			if err != nil {
+				return errMsg{err: err}
 			}
 			if written, err := os.ReadFile("/mnt/etc/u2f_mappings"); err != nil {
 				return errMsg{err: fmt.Errorf("failed to verify /mnt/etc/u2f_mappings: %v", err)}
@@ -746,8 +771,10 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			if out, err := exec.Command("git", "-C", buildDir, "add", "-A").CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to git add: %v\nOutput: %s", err, string(out))}
 			}
-			if _, err := os.Stat(filepath.Join(buildDir, "hardware.nix")); os.IsNotExist(err) {
-				return errMsg{err: fmt.Errorf("hardware.nix does not exist in buildDir")}
+			for _, requiredPath := range []string{hostBuildPaths.Default, hostBuildPaths.Hardware, hostBuildPaths.Configuration} {
+				if _, err := os.Stat(requiredPath); err != nil {
+					return errMsg{err: fmt.Errorf("required host file missing from buildDir: %s (%v)", requiredPath, err)}
+				}
 			}
 			if out, err := exec.Command("git", "-C", buildDir, "commit", "-m", "stable-deterministic-deploy").CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to git commit: %v\nOutput: %s", err, string(out))}
@@ -904,6 +931,86 @@ func getEFIPartitions() []string {
 	return partitions
 }
 
+func validateHostName(host string) error {
+	if !hostNameRE.MatchString(host) {
+		return fmt.Errorf("invalid host name %q", host)
+	}
+	return nil
+}
+
+type hostPaths struct {
+	Dir           string
+	Default       string
+	Hardware      string
+	Configuration string
+}
+
+func buildHostPaths(baseDir, host string) (hostPaths, error) {
+	if err := validateHostName(host); err != nil {
+		return hostPaths{}, err
+	}
+	dir := filepath.Join(baseDir, "hosts", host)
+	return hostPaths{
+		Dir:           dir,
+		Default:       filepath.Join(dir, "default.nix"),
+		Hardware:      filepath.Join(dir, "hardware.nix"),
+		Configuration: filepath.Join(dir, "configuration.nix"),
+	}, nil
+}
+
+func ensureHostPaths(baseDir, host string) (hostPaths, error) {
+	paths, err := buildHostPaths(baseDir, host)
+	if err != nil {
+		return hostPaths{}, err
+	}
+	if err := os.MkdirAll(paths.Dir, 0755); err != nil {
+		return hostPaths{}, fmt.Errorf("failed to create host directory %s: %w", paths.Dir, err)
+	}
+	return paths, nil
+}
+
+func parseEFISelection(selection string) (string, string, error) {
+	fields := strings.Fields(selection)
+	if len(fields) == 0 {
+		return "", "", fmt.Errorf("invalid efi selection %q", selection)
+	}
+	partition := strings.TrimSpace(strings.TrimSuffix(fields[0], ":"))
+	if partition == "" {
+		return "", "", fmt.Errorf("invalid efi selection %q", selection)
+	}
+	const diskMarker = " | Disk: "
+	if idx := strings.Index(selection, diskMarker); idx != -1 {
+		diskInfo := selection[idx+len(diskMarker):]
+		if end := strings.Index(diskInfo, " ["); end != -1 {
+			return partition, strings.TrimSpace(diskInfo[:end]), nil
+		}
+		return partition, strings.TrimSpace(diskInfo), nil
+	}
+	return partition, "", nil
+}
+
+func getPartitionParentDisk(partition string) string {
+	out, err := exec.Command("lsblk", "-n", "-o", "PKNAME", partition).CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	parent := strings.TrimSpace(string(out))
+	if parent == "" {
+		return ""
+	}
+	if !strings.HasPrefix(parent, "/dev/") {
+		parent = filepath.Join("/dev", parent)
+	}
+	return parent
+}
+
+func partitionPath(disk, partNum string) string {
+	if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
+		return disk + "p" + partNum
+	}
+	return disk + partNum
+}
+
 func getWiFiNetworks() []string {
 	out, err := exec.Command("nmcli", "-t", "-f", "SSID", "dev", "wifi", "list").CombinedOutput()
 	if err != nil {
@@ -923,28 +1030,30 @@ func getWiFiNetworks() []string {
 	return ssids
 }
 
-func injectRuntimeSpec(configStr string, spec runtimeSpec, intelID, nvidiaID string) string {
-	lastBrace := strings.LastIndex(configStr, "}")
-	if lastBrace == -1 {
-		return configStr
-	}
-	injection := fmt.Sprintf(`
-            _module.args.spec = {
-              username = %s;
-              cpu = %s;
-              gpu = %s;
-              nvidiaOpen = %t;
-              wifiSSID = %s;
-              wifiPass = %s;
-            };
-            hardware.nvidia.prime = {
-              intelBusId = %s;
-              nvidiaBusId = %s;
-            };
-          `,
-		nixStringLiteral(spec.username), nixStringLiteral(spec.cpu), nixStringLiteral(spec.gpu), spec.nvidiaOpen, nixStringLiteral(spec.wifiSSID), nixStringLiteral(spec.wifiPass), nixStringLiteral(intelID), nixStringLiteral(nvidiaID),
+func renderRuntimeConfiguration(spec runtimeSpec, intelID, nvidiaID string) string {
+	return fmt.Sprintf(`{ ... }:
+{
+  _module.args.spec = {
+    username = %s;
+    cpu = %s;
+    gpu = %s;
+    nvidiaOpen = %t;
+    wifiSSID = %s;
+    wifiPass = %s;
+    intelBusId = %s;
+    nvidiaBusId = %s;
+  };
+}
+`,
+		nixStringLiteral(spec.username),
+		nixStringLiteral(spec.cpu),
+		nixStringLiteral(spec.gpu),
+		spec.nvidiaOpen,
+		nixStringLiteral(spec.wifiSSID),
+		nixStringLiteral(spec.wifiPass),
+		nixStringLiteral(intelID),
+		nixStringLiteral(nvidiaID),
 	)
-	return configStr[:lastBrace] + injection + configStr[lastBrace:]
 }
 
 func nixStringLiteral(value string) string {

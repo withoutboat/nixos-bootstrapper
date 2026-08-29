@@ -23,7 +23,7 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-var BuildDate = "version 18 (Multi-EFI / XBOOTLDR)"
+var BuildDate = "version 19 (Multi-EFI / XBOOTLDR)"
 
 var (
 	titleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F5D4")).Bold(true).MarginLeft(2)

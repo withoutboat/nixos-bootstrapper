@@ -85,27 +85,20 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o nixos-bootstr
 
 ## Get SHA-256/SRI for release asset (without Nix)
 
-For `v0.1.50`, hash this release asset:
+For `<version>`, hash this release asset:
 `nixos-bootstrapper-linux-amd64.tar.gz`
 
-Linux (GNU coreutils):
-
 ```bash
-curl -fL 'https://github.com/withoutboat/nixos-bootstrapper/releases/download/v0.1.50/nixos-bootstrapper-linux-amd64.tar.gz' -o nixos-bootstrapper-linux-amd64.tar.gz
-sha256sum nixos-bootstrapper-linux-amd64.tar.gz
+curl -fL 'https://github.com/withoutboat/nixos-bootstrapper/releases/download/<version>/nixos-bootstrapper-linux-amd64.tar.gz' \
+  -o nixos-bootstrapper-linux-amd64.tar.gz
 ```
 
-macOS (BSD tools):
-
 ```bash
-curl -fL 'https://github.com/withoutboat/nixos-bootstrapper/releases/download/v0.1.50/nixos-bootstrapper-linux-amd64.tar.gz' -o nixos-bootstrapper-linux-amd64.tar.gz
-shasum -a 256 nixos-bootstrapper-linux-amd64.tar.gz
-```
-
-The hexadecimal digest printed by `sha256sum`/`shasum` is not directly the Nix SRI value. Convert the downloaded file to SRI format with portable Python 3:
-
-```bash
-python3 -c 'import base64,hashlib; print("sha256-" + base64.b64encode(hashlib.sha256(open("nixos-bootstrapper-linux-amd64.tar.gz","rb").read()).digest()).decode())'
+printf 'sha256-%s\n' "$(
+  openssl dgst -sha256 -binary nixos-bootstrapper-linux-amd64.tar.gz \
+    | base64 \
+    | tr -d '\n'
+)"
 ```
 
 Use the result in `nix-core/pkgs/nixos-bootstrapper.nix`:

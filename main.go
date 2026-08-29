@@ -24,7 +24,7 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-var BuildDate = "version 19 (Multi-EFI / XBOOTLDR)"
+var BuildDate = "version 20 (Multi-EFI / XBOOTLDR)"
 
 var (
 	titleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F5D4")).Bold(true).MarginLeft(2)
@@ -756,11 +756,6 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 			hostBuildPaths, err := buildHostPaths(buildDir, m.hosts[m.selectedHost])
 			if err != nil {
 				return errMsg{err: err}
-			}
-			if written, err := os.ReadFile("/mnt/etc/u2f_mappings"); err != nil {
-				return errMsg{err: fmt.Errorf("failed to verify /mnt/etc/u2f_mappings: %v", err)}
-			} else if len(bytes.TrimSpace(written)) == 0 {
-				return errMsg{err: fmt.Errorf("/mnt/etc/u2f_mappings was created but is empty")}
 			}
 			_ = exec.Command("rm", "-rf", filepath.Join(buildDir, ".git")).Run()
 			_ = exec.Command("find", buildDir, "-name", ".gitignore", "-type", "f", "-delete").Run()

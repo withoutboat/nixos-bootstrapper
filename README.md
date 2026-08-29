@@ -1,18 +1,18 @@
 # nixos-bootstrapper
 
-`nixos-bootstrapper` — это Linux amd64 bootstrapper/installer, который запускается **внутри ISO-установщика** и разворачивает NixOS на выбранный диск.  
-Сам бинарник `nixos-bootstrapper` **не является macOS-приложением**.
+`nixos-bootstrapper` is a Linux amd64 bootstrapper/installer that runs **inside the installer ISO** and deploys NixOS to the selected disk.  
+The `nixos-bootstrapper` binary itself is **not a macOS application**.
 
-## Запись ISO на загрузочную флешку (Linux)
+## Write ISO to a bootable USB drive (Linux)
 
-1. Подключите флешку.
-2. Найдите устройство:
+1. Plug in your USB drive.
+2. Find the device:
 
 ```bash
 lsblk
 ```
 
-3. Запишите ISO на **весь диск** (пример: `/dev/sdb`, не `/dev/sdb1`):
+3. Write the ISO to the **whole disk** (example: `/dev/sdb`, not `/dev/sdb1`):
 
 ```bash
 ISO_PATH="/path/to/nixos-installer.iso"
@@ -22,25 +22,25 @@ sudo dd if="$ISO_PATH" of="$USB_DISK" bs=4M status=progress oflag=sync conv=fsyn
 sync
 ```
 
-⚠️ `of=` должен указывать на **диск целиком**, а не на раздел.  
-⚠️ Выбранный диск будет полностью перезаписан.
+⚠️ `of=` must point to the **entire disk**, not a partition.  
+⚠️ The selected disk will be completely overwritten.
 
-## Запись ISO на загрузочную флешку (macOS)
+## Write ISO to a bootable USB drive (macOS)
 
-1. Подключите флешку.
-2. Найдите номер диска флешки:
+1. Plug in your USB drive.
+2. Find the USB disk number:
 
 ```bash
 diskutil list
 ```
 
-3. Размонтируйте диск флешки:
+3. Unmount the USB disk:
 
 ```bash
 diskutil unmountDisk /dev/diskN
 ```
 
-4. Запишите ISO через raw-устройство (быстрее):
+4. Write the ISO using the raw device (faster):
 
 ```bash
 sudo dd if=/path/to/nixos-installer.iso of=/dev/rdiskN bs=1m
@@ -48,42 +48,42 @@ sync
 diskutil eject /dev/diskN
 ```
 
-Замените `N` на номер вашей флешки из `diskutil list` (например, `disk2`/`rdisk2`).
+Replace `N` with your USB disk number from `diskutil list` (for example, `disk2`/`rdisk2`).
 
-⚠️ Не используйте команды, которые автоматически выбирают диск.  
-⚠️ Будьте внимательны: выбранный диск будет полностью перезаписан.
+⚠️ Do not use commands that auto-select the disk.  
+⚠️ Be careful: the selected disk will be completely overwritten.
 
-## Загрузка с флешки и установка
+## Boot from USB and run installation
 
-1. Загрузите целевую машину с записанной USB-флешки (через Boot Menu/UEFI).
-2. Запустите bootstrapper в среде ISO.
-3. Пройдите интерактивный сценарий:
-   - выбор `host`;
-   - выбор целевого диска;
-   - настройка EFI;
-   - `username`;
-   - `passphrase`;
-   - Wi-Fi (SSID/пароль), если требуется.
-4. Подтвердите установку и дождитесь завершения.
+1. Boot the target machine from the USB drive (Boot Menu/UEFI).
+2. Start the bootstrapper in the ISO environment.
+3. Complete the interactive flow:
+   - select `host`;
+   - select target disk;
+   - configure EFI;
+   - set `username`;
+   - set `passphrase`;
+   - configure Wi-Fi (SSID/password), if needed.
+4. Confirm installation and wait for completion.
 
-⚠️ Выбранный целевой диск стирается в процессе установки.
+⚠️ The selected target disk is erased during installation.
 
-## Сборка и тесты (Go)
+## Build and test (Go)
 
-Команды, которые используются в этом репозитории:
+Commands used in this repository:
 
 ```bash
 go test ./...
 go build
 ```
 
-Для сборки Linux amd64 статического бинарника (как в релизном workflow):
+To build a static Linux amd64 binary (as in the release workflow):
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o nixos-bootstrapper main.go
 ```
 
-## Релизы
+## Releases
 
-- `.github/workflows/release.yml` в этом репозитории собирает и публикует `nixos-bootstrapper-linux-amd64.tar.gz` при push тега `v*`.
-- ISO-образ собирается и публикуется workflow в репозитории `withoutboat/nix-core`, а не в этом репозитории.
+- `.github/workflows/release.yml` in this repository builds and publishes `nixos-bootstrapper-linux-amd64.tar.gz` on push of tags matching `v*`.
+- The ISO image is built and published by a workflow in `withoutboat/nix-core`, not by this repository.

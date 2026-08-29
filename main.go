@@ -105,6 +105,9 @@ type errMsg struct{ err error }
 type installStartedMsg struct{ ch chan tea.Msg }
 type triggerRestartMsg struct{ binaryPath string }
 
+type commandRunner func(name string, args ...string) ([]byte, error)
+type statFunc func(string) (os.FileInfo, error)
+
 func initialModel() model {
 	ti := textinput.New()
 	ti.Placeholder = "Enter target username (e.g. vladimir)..."
@@ -595,17 +598,14 @@ func (m *model) runStep(stepIdx int) tea.Cmd {
 					return errMsg{err: fmt.Errorf("selected existing efi partition %s resides on target disk %s; refusing to wipe the disk containing the selected efi", m.targetEFIDisk, disk)}
 				}
 			}
-			exec.Command("umount", "-R", "/mnt").Run()
-			exec.Command("umount", "-l", "/mnt").Run()
-			exec.Command("swapoff", "-a").Run()
-			exec.Command("cryptsetup", "close", "cryptroot").Run()
-			exec.Command("dmsetup", "remove", "-f", "cryptroot").Run()
+			if err := cleanupBeforeLUKS(runCombinedCommand, os.Stat); err != nil {
+				return errMsg{err: err}
+			}
 			if out, err := exec.Command("sgdisk", "-Z", disk).CombinedOutput(); err != nil {
 				return errMsg{err: fmt.Errorf("failed to wipe target disk: %v\nOutput: %s", err, string(out))}
 			}
-			rootPartNum, bootPartNum := "1", ""
-			if m.targetEFIDisk == "" {
-				rootPartNum, bootPartNum = "2", "1"
+			rootPartNum, bootPartNum := partitionPlan(m.targetEFIDisk != "")
+			if bootPartNum != "" {
 				if out, err := exec.Command("sgdisk", "-n", bootPartNum+":0:+1G", "-t", bootPartNum+":ef00", "-c", bootPartNum+":boot", disk).CombinedOutput(); err != nil {
 					return errMsg{err: fmt.Errorf("failed to create boot partition: %v\nOutput: %s", err, string(out))}
 				}
@@ -1009,6 +1009,77 @@ func partitionPath(disk, partNum string) string {
 		return disk + "p" + partNum
 	}
 	return disk + partNum
+}
+
+func partitionPlan(usingExistingEFI bool) (rootPartNum, bootPartNum string) {
+	if usingExistingEFI {
+		return "1", ""
+	}
+	return "2", "1"
+}
+
+func runCombinedCommand(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).CombinedOutput()
+}
+
+func cleanupBeforeLUKS(run commandRunner, stat statFunc) error {
+	umountRecursiveOut, umountRecursiveErr := run("umount", "-R", "/mnt")
+	if umountRecursiveErr != nil && !isIgnorableUmountError(umountRecursiveOut) {
+		umountLazyOut, umountLazyErr := run("umount", "-l", "/mnt")
+		if umountLazyErr != nil && !isIgnorableUmountError(umountLazyOut) {
+			return fmt.Errorf("failed to unmount /mnt before cleanup: recursive err=%v output=%s; lazy err=%v output=%s",
+				umountRecursiveErr, strings.TrimSpace(string(umountRecursiveOut)),
+				umountLazyErr, strings.TrimSpace(string(umountLazyOut)))
+		}
+	}
+
+	if out, err := run("swapoff", "-a"); err != nil {
+		return fmt.Errorf("failed to disable swap before cleanup: %v\nOutput: %s", err, string(out))
+	}
+
+	if out, err := run("cryptsetup", "close", "cryptroot"); err != nil && !isIgnorableMissingCryptroot(out) {
+		return fmt.Errorf("failed to close existing cryptroot mapping: %v\nOutput: %s", err, string(out))
+	}
+
+	if out, err := run("dmsetup", "remove", "-f", "cryptroot"); err != nil && !isIgnorableMissingDMMapping(out) {
+		return fmt.Errorf("failed to remove stale device-mapper cryptroot mapping: %v\nOutput: %s", err, string(out))
+	}
+
+	exists, err := pathExists("/dev/mapper/cryptroot", stat)
+	if err != nil {
+		return fmt.Errorf("failed to verify cryptroot cleanup state: %w", err)
+	}
+	if exists {
+		return fmt.Errorf("cleanup failed: stale mapping still exists at /dev/mapper/cryptroot")
+	}
+
+	return nil
+}
+
+func pathExists(path string, stat statFunc) (bool, error) {
+	_, err := stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+func isIgnorableUmountError(out []byte) bool {
+	lower := strings.ToLower(string(out))
+	return strings.Contains(lower, "not mounted") || strings.Contains(lower, "no mount point specified")
+}
+
+func isIgnorableMissingCryptroot(out []byte) bool {
+	lower := strings.ToLower(string(out))
+	return strings.Contains(lower, "not active") || strings.Contains(lower, "does not exist")
+}
+
+func isIgnorableMissingDMMapping(out []byte) bool {
+	lower := strings.ToLower(string(out))
+	return strings.Contains(lower, "no such device") || strings.Contains(lower, "not found")
 }
 
 func getWiFiNetworks() []string {
